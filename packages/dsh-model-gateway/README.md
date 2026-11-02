@@ -57,12 +57,14 @@ packages/
 - 如果 DSH 启动环境里有 `OPENCODE_GO_API_KEY`，它直接代理真实 OpenCode Go API；
 - 没有 key 时自动进入 mock 模式，仍然按真实 SSE 协议返回 reasoning/text/usage，可以完整验证 DSH 链路。
 
-真实模式使用：
+真实模式使用用户级环境变量，然后完全退出并重启 DSH（桌面图标启动的 DSH 不会继承当前终端里的临时 `$env:`）：
 
 ```powershell
-# 在启动 DSH 的同一环境里设置，之后重启 DSH
-$env:OPENCODE_GO_API_KEY = "sk-..."
+[Environment]::SetEnvironmentVariable("OPENCODE_GO_API_KEY", "sk-...", "User")
+# 完全退出 DSH（含托盘/后台进程），再重新启动
 ```
+
+更完整的步骤和 `mode=live` 验证见 [QUICKSTART.md](../../QUICKSTART.md) 的 B 段。
 
 OpenCode Go 文档要求客户端发送稳定会话头，演示配置已经设置：
 
@@ -106,7 +108,7 @@ gateway_selftest({ "prompt": "Reply with exactly: gateway ok" })
           my-model:
             displayName: My Model
             command: python
-            script: path/to/server.py
+            script: server.py
             cwd: H:/path/to/project
             port: 8099
             health:

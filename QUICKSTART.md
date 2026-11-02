@@ -236,11 +236,13 @@ python server.py
 Invoke-RestMethod http://127.0.0.1:8099/health
 ```
 
+确认 `/health` 返回 200 后，回到运行 `python server.py` 的终端按 `Ctrl+C`，释放 8099 端口，再继续下一步。否则 C-3 安装 bundle 时，插件会正确报告 `PORT_IN_USE`，而你会误以为是配置问题。
+
 ### C-2. 创建 bundle 目录
 
 ```powershell
 $My = (Resolve-Path $My).Path
-Write-Output $My      # 下面 YAML 的 H:/Users/you/my-model-gateway 换成这个值（用正斜杠也可以）
+Write-Output $My      # 把输出中的反斜杠替换成正斜杠，再填到下面的 YAML
 New-Item -ItemType Directory -Force "$My\bundle" | Out-Null
 ```
 
@@ -298,11 +300,13 @@ New-Item -ItemType Directory -Force "$My\bundle" | Out-Null
                   maxTokens: 8192
 ```
 
-把 `script` / `cwd` 改成你的绝对路径；Windows 下用正斜杠也可以。
+把 `script` / `cwd` 改成你的绝对路径。**Windows 路径写进 YAML 时推荐用正斜杠**（如 `C:/Users/you/my-model-gateway`）：双引号里的反斜杠会被 YAML 当作转义符，`C:\Users` 会直接解析失败。
 
 ### C-3. 安装并验证
 
-先确保 A-1 的框架 bundle 已安装，然后安装 `$My\bundle`。
+先确保 A-1 的框架 bundle 已安装。如果之前走 A 时安装了 `dsh-model-gateway-demo`，现在请在 Plugin Manager 中**禁用或卸载它**，再安装 `$My\bundle`。
+
+原因：每条 `model-gateway` 行都会注册同名的四个全局工具。一个部署应保持**一条活跃的网关配置行**；多条行会互相遮蔽 `gateway_status()` 的结果，`gateway_selftest`/`gateway_control` 也可能找不到另一个网关。多个网关进程应写进同一条 `gateways:` 映射。
 
 ```json
 gateway_status()
@@ -332,8 +336,8 @@ DSH llm StreamChunk
 | 现象 | 原因 | 处理 |
 |---|---|---|
 | `gateway_status` 为空或没有工具 | 插件未安装/未启用 | Plugin Manager 检查 `model-gateway` 行；确认 bundle 安装顺序（框架在前） |
-| `state: failed`，`lastError` 含 `ENOENT` | `command` 或 `script` 路径错，或 Python 不在 PATH | `python --version`；用绝对路径；Windows 可写 `command: python` 或 `command: py` |
-| `PORT_IN_USE` | 端口被占 | 改 `port`，同时改 `provider.baseURL` 和 `health.url` |
+| `state: failed`，`lastError` 含 `SCRIPT_MISSING` / `CWD_MISSING` / `ENOENT` | `script`/`cwd` 路径不存在，或 `command`（Python）不在 PATH | 检查 `script`/`cwd` 绝对路径；`python --version`；Windows 可试 `command: python` 或 `command: py` |
+| `PORT_IN_USE` | 端口被占 | 先停掉 C-1 手动测试进程；仍占用再改 `port`，并同步 `provider.baseURL` 和 `health.url` |
 | `STARTUP_TIMEOUT` | 进程没监听，或 `/health` 不对 | 先手动运行 server；看 `gateway_logs`；必要时增大 `startupTimeoutMs` |
 | 启动日志有 `waiting for readiness: http TypeError: fetch failed` | 进程刚启动还没监听，第一次探测失败 | 通常下一次探测会成功；持续出现再查端口/健康地址 |
 | `mode=mock` 但想要真实调用 | DSH 进程环境没有 key | 在**启动 DSH 的环境**设置 `OPENCODE_GO_API_KEY`，重启 DSH |

@@ -36,7 +36,7 @@ Then read the framework guide:
 - [Demo bundle patch](packages/dsh-model-gateway-demo/cordis.patch.yml)
 - [Custom gateway template](packages/dsh-model-gateway/examples/template/server.py)
 
-Install both local package directories with DSH Plugin Manager's `install_bundle` action, then use the `gateway-status`, `gateway-control`, `gateway-logs` and `gateway-selftest` tools (or select the registered model route in DSH).
+Install both local package directories with DSH Plugin Manager's `install_bundle` action, then use the `gateway_status`, `gateway_control`, `gateway_logs` and `gateway_selftest` tools (or select the registered model route in DSH).
 
 The demo gateway runs in `auto` mode: set `OPENCODE_GO_API_KEY` in the DSH launch environment to proxy the real OpenCode Go API, or leave it unset to exercise the complete DSH path against a protocol-faithful mock.
 
