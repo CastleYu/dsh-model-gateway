@@ -111,6 +111,35 @@ test('normalizes a valid gateway and rejects invalid routes', () => {
   assert.equal(normalized.gateways[0].provider.baseURL, 'http://127.0.0.1:12345/v1')
   assert.equal(normalized.gateways[0].script, path.resolve(process.cwd(), 'server.py'))
 
+  const healthConfig = normalizeConfig({
+    gateways: {
+      health: {
+        command: 'python',
+        port: 8099,
+        provider: { models: [{ id: 'm' }] },
+        health: { path: '/health', intervalMs: 500 },
+      },
+    },
+  }, { packageDir }).gateways[0]
+  assert.equal(healthConfig.health.type, 'http')
+  assert.equal(healthConfig.health.url, 'http://127.0.0.1:8099/health')
+
+  const expandedHealth = normalizeConfig({
+    gateways: {
+      health: {
+        command: 'python',
+        port: 8099,
+        provider: { models: [{ id: 'm' }] },
+        health: { url: 'http://127.0.0.1:${port}/health?host=${host}' },
+      },
+    },
+  }, { packageDir }).gateways[0]
+  assert.equal(expandedHealth.health.url, 'http://127.0.0.1:8099/health?host=127.0.0.1')
+  assert.throws(
+    () => normalizeConfig({ gateways: { badPath: { command: 'python', port: 8099, provider: { models: [{ id: 'm' }] }, health: { path: 'health' } } } }, { packageDir }),
+    /path must start with/,
+  )
+
   assert.throws(
     () => normalizeConfig({ gateways: { x: { command: 'a' }, y: { command: 'b' } } }, { packageDir }),
     (error) => error instanceof GatewayConfigError && /provider\.baseURL is required/.test(error.message),
@@ -322,6 +351,28 @@ test('child exit during readiness aborts start instead of reporting running', as
   await assert.rejects(supervisor.start('test'), /exited during startup|startup/i)
   assert.equal(supervisor.snapshot().state, 'failed')
   assert.equal(supervisor.snapshot().pid, undefined)
+})
+
+test('startup failure leaves the pending restart state visible', async (t) => {
+  const config = normalizeConfig({
+    gateways: {
+      early: {
+        command: process.execPath,
+        args: ['-e', 'process.exit(1)'],
+        cwd: testDir,
+        health: false,
+        provider: false,
+        restart: { enabled: true, maxRestarts: 3, initialDelayMs: 5_000, maxDelayMs: 10_000 },
+        logs: { maxLines: 50 },
+      },
+    },
+  }, { packageDir }).gateways[0]
+  const supervisor = new GatewaySupervisor({ config, ctx: fakeCtx(), packageDir })
+  t.after(async () => { await supervisor.dispose() })
+
+  await assert.rejects(supervisor.start('test'), /exited during startup|startup/i)
+  assert.equal(supervisor.snapshot().state, 'restarting')
+  assert.equal(typeof supervisor.snapshot().nextRestartAt, 'number')
 })
 
 test('crashed gateway is automatically restarted with a new pid', async (t) => {

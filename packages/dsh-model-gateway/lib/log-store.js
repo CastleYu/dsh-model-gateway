@@ -113,7 +113,7 @@ export class GatewayLog {
   }
 
   tail({ limit = 200, stream, event, since } = {}) {
-    const count = Math.max(1, Math.min(5_000, Number.isInteger(limit) ? limit : 200))
+    const count = Math.max(1, Math.min(500, Number.isInteger(limit) ? limit : 200))
     const sinceMs = since === undefined ? undefined : Date.parse(since)
     const selected = []
     for (let i = this.entries.length - 1; i >= 0 && selected.length < count; i -= 1) {

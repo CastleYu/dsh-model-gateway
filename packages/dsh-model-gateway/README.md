@@ -178,7 +178,6 @@ config:
 | `host` | `127.0.0.1` | 注入 `HOST`，健康检查使用 |
 | `autoStart` | `true` | 插件加载后自动启动 |
 | `checkPort` | `true` | 启动前检查端口占用 |
-| `reuseExisting` | `false` | 端口已被占用时复用现有监听者（不推荐） |
 | `stopTimeoutMs` | 5000 | 停止超时；Windows 上直接强杀进程树 |
 | `health` | 见下 | 就绪/存活检查 |
 | `restart` | 见下 | 崩溃/看门狗重启策略 |
@@ -328,7 +327,7 @@ packages/dsh-model-gateway/logs/opencode-go.jsonl
 
 本仓库完成时已实际验证：
 
-- `node --test packages/dsh-model-gateway/test/gateway.test.mjs`：14/14 通过（启动/流式、截断流、损坏 SSE、length 工具调用、启动预检、启动期退出、崩溃重启、重启预算耗尽、健康看门狗、禁用重启、健康预算耗尽停止子进程、配置、SSE、脱敏）；
+- `node --test packages/dsh-model-gateway/test/gateway.test.mjs`：15/15 通过（启动/流式、截断流、损坏 SSE、length 工具调用、启动预检、启动期退出/待重启状态、崩溃重启、重启预算耗尽、健康看门狗、禁用重启、健康预算耗尽停止子进程、health path/URL、配置、SSE、脱敏）；
 - `gateway_status`：`running`、健康、PID、模型路由；
 - `gateway_selftest`：真实 OpenCode Go 流式响应，返回 `gateway ok` / `restart ok` / `autostart ok`；
 - 手动 `taskkill` 网关进程后：插件在约 1 秒内拉起新 PID，`restarts: 1`，随后自测成功；

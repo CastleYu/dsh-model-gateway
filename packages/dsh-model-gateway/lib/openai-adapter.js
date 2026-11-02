@@ -271,6 +271,14 @@ export function createOpenAIAdapter({ config, supervisor, ctx, log }) {
     if (configured.length > 0 || !provider.discoverModels) return configured
 
     if (Date.now() - modelCache.at < 30_000) return modelCache.models
+    if (supervisor !== undefined) {
+      try {
+        await supervisor.ensureRunning()
+      } catch (error) {
+        log.trace('models-gateway-unavailable', { message: String(error?.message ?? error), code: error?.code })
+        return configured
+      }
+    }
     const url = provider.modelsURL ?? joinURL(provider.baseURL, '/models')
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(new Error('model list timeout')), provider.modelListTimeoutMs)
@@ -352,6 +360,10 @@ export function createOpenAIAdapter({ config, supervisor, ctx, log }) {
     for (const message of options.messages) {
       if (message.role === 'system' || message.role === 'developer') continue
       if (message.role === 'user') {
+        if (typeof message.content === 'string') {
+          messages.push({ role: 'user', content: message.content })
+          continue
+        }
         const parts = []
         for (const block of message.content ?? []) {
           if (block?.type === 'text' && typeof block.text === 'string') parts.push({ type: 'text', text: block.text })
@@ -367,6 +379,7 @@ export function createOpenAIAdapter({ config, supervisor, ctx, log }) {
       if (message.role === 'assistant') {
         const text = textOfContent(message.content)
         const calls = toolCallsOf(message.content)
+        if (text.length === 0 && calls.length === 0) continue
         const entry = { role: 'assistant', content: text.length > 0 ? text : null }
         if (calls.length > 0) {
           entry.tool_calls = calls.map((call) => ({
@@ -487,7 +500,17 @@ export function createOpenAIAdapter({ config, supervisor, ctx, log }) {
   async function* stream(options) {
     const signal = options.signal
     if (signal?.aborted) throw signal.reason ?? new Error('aborted')
-    if (supervisor !== undefined) await supervisor.ensureRunning()
+    if (supervisor !== undefined) {
+      try {
+        await supervisor.ensureRunning()
+      } catch (error) {
+        throw gatewayError(
+          `gateway "${config.id}" is unavailable: ${String(error?.message ?? error)}`,
+          error?.code ?? 'GATEWAY_DOWN',
+          { cause: error },
+        )
+      }
+    }
     const started = Date.now()
     const body = buildBody(options)
     body.messages = await buildMessages(options, signal)

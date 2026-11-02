@@ -23,19 +23,37 @@ export function delay(ms, signal) {
 }
 
 export async function isPortFree(host, port, timeoutMs = 1_000) {
-  if (!Number.isInteger(port) || port <= 0) return true
+  if (!Number.isInteger(port) || port <= 0) return { free: true }
   return await new Promise((resolve) => {
     const server = net.createServer()
     let settled = false
-    const finish = (value) => {
+    let timer
+    const finish = (result) => {
       if (settled) return
       settled = true
-      try { server.close() } catch {}
-      resolve(value)
+      if (timer !== undefined) clearTimeout(timer)
+      resolve(result)
     }
-    server.once('error', (error) => finish(error.code === 'EADDRINUSE' ? false : false))
-    server.listen({ host, port, exclusive: true }, () => finish(true))
-    setTimeout(() => finish(false), timeoutMs).unref?.()
+    server.once('error', (error) => {
+      finish({
+        free: false,
+        reason: error?.code ?? 'ERROR',
+        detail: String(error?.message ?? error),
+      })
+    })
+    server.listen({ host, port, exclusive: true }, () => {
+      // Resolve only after close: the probe itself must release the port
+      // before the supervisor is allowed to spawn the real listener.
+      server.close(() => finish({ free: true }))
+    })
+    timer = setTimeout(() => {
+      try {
+        server.close(() => finish({ free: false, reason: 'TIMEOUT', detail: `port probe timed out after ${timeoutMs}ms` }))
+      } catch {
+        finish({ free: false, reason: 'TIMEOUT', detail: `port probe timed out after ${timeoutMs}ms` })
+      }
+    }, timeoutMs)
+    timer.unref?.()
   })
 }
 

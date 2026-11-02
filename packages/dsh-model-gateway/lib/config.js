@@ -135,18 +135,22 @@ function normalizeHealth(raw, field, { host, port, baseURL }) {
   else if (isPlainObject(raw)) source = raw
   else if (raw !== undefined && raw !== null) fail(`${field} must be an object, URL string or false`)
 
-  let type = asOptionalString(source.type, `${field}.type`) ?? (port > 0 ? 'tcp' : 'http')
+  let type = asOptionalString(source.type, `${field}.type`)
+    ?? (source.path !== undefined || source.url !== undefined ? 'http' : port > 0 ? 'tcp' : 'http')
   if (type !== 'http' && type !== 'tcp' && type !== 'none') fail(`${field}.type must be "http", "tcp" or "none"`)
   if (type === 'none') return { type }
+  if (type === 'tcp' && source.path !== undefined) fail(`${field}.path requires an HTTP health check`)
 
   let url = asOptionalString(source.url, `${field}.url`)
   if (url !== undefined) {
     type = 'http'
-    url = expandString(url, {})
+    url = expandString(url, { host, port })
   }
   if (type === 'http' && url === undefined) {
-    const base = source.path !== undefined
-      ? `${originOf(baseURL ?? '')}${asString(source.path, `${field}.path`)}`
+    const path = source.path === undefined ? undefined : asString(source.path, `${field}.path`)
+    if (path !== undefined && !path.startsWith('/')) fail(`${field}.path must start with "/"`)
+    const base = path !== undefined
+      ? `${originOf(baseURL ?? '')}${expandString(path, { host, port })}`
       : (baseURL ?? '')
     if (!base) fail(`${field} needs a URL, a path, or a provider baseURL`)
     url = base
@@ -353,7 +357,6 @@ export function normalizeConfig(raw, { packageDir }) {
       host,
       port,
       checkPort: asBoolean(entry.checkPort, `${at}.checkPort`, true),
-      reuseExisting: asBoolean(entry.reuseExisting, `${at}.reuseExisting`, false),
       autoStart,
       stopTimeoutMs: asInteger(entry.stopTimeoutMs, `${at}.stopTimeoutMs`, 5_000, { min: 100 }),
       health,

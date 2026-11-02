@@ -29,7 +29,6 @@
               OPENCODE_GO_UPSTREAM_BASE: https://opencode.ai/inference/go/openai/v1
             autoStart: true
             checkPort: true
-            reuseExisting: false
             stopTimeoutMs: 5000
             health:
               type: http

@@ -166,6 +166,11 @@ export class GatewaySupervisor extends EventEmitter {
   async start(reason = 'manual') {
     if (!this.config.enabled) throw errorWithCode(`gateway "${this.config.id}" is disabled`, 'GATEWAY_DISABLED')
     if (this.disposed) throw errorWithCode(`gateway "${this.config.id}" supervisor is disposed`, 'GATEWAY_DISPOSED')
+    // Explicit operator recovery (and fresh boot) starts a new failure budget.
+    // Automatic restart reasons keep the current budget.
+    if (reason === 'manual' || reason === 'tool' || reason === 'autostart' || reason === 'manual-restart') {
+      this.restartHistory = []
+    }
     this.desiredRunning = true
     if (this.state === 'running') return this.snapshot()
     if (this.starting !== undefined) return await this.starting
@@ -186,22 +191,12 @@ export class GatewaySupervisor extends EventEmitter {
     await this._clearChildIfExited()
 
     if (this.config.checkPort && this.config.port > 0) {
-      const free = await isPortFree(this.config.host, this.config.port)
-      if (!free) {
-        if (this.config.reuseExisting) {
-          this.log('warn', `port ${this.config.host}:${this.config.port} is already serving; reusing the existing process (reuseExisting=true)`)
-          this.state = 'running'
-          this.startedAt = Date.now()
-          this.pid = undefined
-          this.health = { ok: true, detail: 'reused existing listener', lastCheckAt: Date.now(), consecutiveFailures: 0 }
-          this.trace('reuse-existing', { host: this.config.host, port: this.config.port })
-          this._startHealthLoop()
-          this.emitChange()
-          return this.snapshot()
-        }
+      const probe = await isPortFree(this.config.host, this.config.port)
+      if (!probe.free) {
+        const code = probe.reason === 'EADDRINUSE' ? 'PORT_IN_USE' : 'PORT_CHECK_FAILED'
         throw this._startFailure(
-          errorWithCode(`port ${this.config.host}:${this.config.port} is already in use`, 'PORT_IN_USE'),
-          'PORT_IN_USE',
+          errorWithCode(`port ${this.config.host}:${this.config.port} is not available (${probe.detail ?? probe.reason})`, code),
+          code,
         )
       }
     }
@@ -249,6 +244,7 @@ export class GatewaySupervisor extends EventEmitter {
       port: this.config.port,
     })
 
+    const spawnStartedAt = Date.now()
     let child
     try {
       child = spawn(this.config.command, args, {
@@ -289,11 +285,14 @@ export class GatewaySupervisor extends EventEmitter {
       this.log('error', `startup failed: ${String(error?.message ?? error)}`)
       this.trace('startup-failed', { message: String(error?.message ?? error), code: error?.code })
       await this.killCurrent({ force: true, reason: 'startup-failed' })
-      this.state = 'failed'
+      const restartPending = this.restartTimer !== undefined || this.state === 'restarting'
+      if (!restartPending) this.state = 'failed'
       this.lastError = String(error?.message ?? error)
       this.startAbort = undefined
       this.emitChange()
-      if (this.desiredRunning && !this.stopping && !this.disposed) this.scheduleRestart('startup-failed')
+      if (!restartPending && this.desiredRunning && !this.stopping && !this.disposed) {
+        this.scheduleRestart('startup-failed')
+      }
       throw error
     }
 
@@ -304,7 +303,7 @@ export class GatewaySupervisor extends EventEmitter {
     this.health = { ok: true, detail: 'ready', lastCheckAt: Date.now(), consecutiveFailures: 0 }
     this.startAbort = undefined
     this.log('info', `ready (pid ${this.pid ?? 'external'}) on ${this.baseURL ?? `${this.config.host}:${this.config.port}`}`)
-    this.trace('ready', { pid: this.pid, elapsedMs: Date.now() - this.startedAt })
+    this.trace('ready', { pid: this.pid, elapsedMs: Date.now() - spawnStartedAt })
     this._startHealthLoop()
     this.emitChange()
     return this.snapshot()
@@ -441,12 +440,15 @@ export class GatewaySupervisor extends EventEmitter {
       this.emitChange()
       return
     }
-    this.restartHistory.push(now)
-    this.trace('watchdog-restart', { detail, attempt: this.restartHistory.length })
+    this.trace('watchdog-restart', { detail, attempt: this.restartHistory.length + 1 })
     this.health.consecutiveFailures = 0
     try {
       await this.stop({ reason: 'health-watchdog', keepDesired: true })
       await this.start('health-watchdog')
+      // Count one recycle only after it actually started; a failed start is
+      // counted once by scheduleRestart(), not again here.
+      this.restartHistory.push(Date.now())
+      this.trace('watchdog-recovered', { detail, attempt: this.restartHistory.length })
     } catch (error) {
       this.log('error', `watchdog restart failed: ${String(error?.message ?? error)}`)
       if (this.desiredRunning) this.scheduleRestart('watchdog-restart-failed')
@@ -553,7 +555,7 @@ export class GatewaySupervisor extends EventEmitter {
     // close request, and a second pass can take many seconds. Force the tree
     // by default there; POSIX keeps SIGTERM grace before SIGKILL.
     const effectiveForce = force || process.platform === 'win32'
-    const graceMs = effectiveForce ? 0 : Math.min(this.config.stopTimeoutMs, 1_500)
+    const graceMs = effectiveForce ? 0 : Math.min(this.config.stopTimeoutMs, 30_000)
     if (effectiveForce && !force) this.log('info', 'force-stopping the Windows process tree')
     const result = await killTree(child, { force: effectiveForce, timeoutMs: Math.max(1_000, graceMs + 1_000) })
     if (!result.ok) this.log('warn', `kill reported: ${result.detail}`)
