@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Model Gateway",
+    "description": "Supervises local model gateway processes and exposes them as DSH model routes, with health checks, crash restart and internal logs."
+  }
+}

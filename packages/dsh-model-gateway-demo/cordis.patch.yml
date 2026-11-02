@@ -1,0 +1,75 @@
+# Worked example for the model-gateway framework.
+#
+# This row is a second instance of the framework plugin with a concrete
+# gateway.  It starts the bundled OpenCode Go server with Python, waits for
+# /health, and registers the `gateway-opencode-go` model route.
+#
+# The gateway runs in `auto` mode: if OPENCODE_GO_API_KEY is present in the DSH
+# launching environment it proxies the real OpenCode Go API; otherwise it
+# serves a deterministic mock protocol so the full DSH integration can be
+# verified without a paid credential.
+- insert:
+    - id: model-gateway-opencode-go
+      name: '@local/dsh-model-gateway'
+      config:
+        gateways:
+          opencode-go:
+            displayName: OpenCode Go
+            description: "Bundled OpenCode Go example gateway (auto: live when OPENCODE_GO_API_KEY is set, otherwise mock)."
+            command: python
+            script: examples/opencode-go/server.py
+            resolveFrom: package
+            args: []
+            port: 47180
+            host: 127.0.0.1
+            env:
+              GATEWAY_MODE: auto
+              PYTHONUNBUFFERED: "1"
+              OPENCODE_GO_API_KEY: "${env:OPENCODE_GO_API_KEY}"
+              OPENCODE_GO_UPSTREAM_BASE: https://opencode.ai/inference/go/openai/v1
+            autoStart: true
+            checkPort: true
+            reuseExisting: false
+            stopTimeoutMs: 5000
+            health:
+              type: http
+              url: http://127.0.0.1:47180/health
+              intervalMs: 3000
+              timeoutMs: 2000
+              startupTimeoutMs: 20000
+              failureThreshold: 3
+              successThreshold: 1
+            restart:
+              enabled: true
+              maxRestarts: 5
+              windowMs: 3600000
+              initialDelayMs: 1000
+              maxDelayMs: 15000
+              stableAfterMs: 60000
+            logs:
+              maxLines: 4000
+              maxBytes: 2097152
+              file: logs/opencode-go.jsonl
+            provider:
+              route: gateway-opencode-go
+              displayName: OpenCode Go (local gateway)
+              baseURL: http://127.0.0.1:47180/v1
+              requestPath: /chat/completions
+              sessionHeader: x-opencode-session
+              sendSessionHeader: true
+              trace: summary
+              discoverModels: false
+              startOnRequest: true
+              models:
+                - id: deepseek-v4.1-flash
+                  name: DeepSeek V4.1 Flash
+                  contextWindow: 262144
+                  maxTokens: 32768
+                - id: glm-5.3-flash
+                  name: GLM-5.3 Flash
+                  contextWindow: 131072
+                  maxTokens: 16384
+                - id: kimi-k3
+                  name: Kimi K3
+                  contextWindow: 262144
+                  maxTokens: 32768

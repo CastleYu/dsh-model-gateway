@@ -1,0 +1,11 @@
+# Runtime output from the example/demo gateway
+packages/dsh-model-gateway/logs/
+
+# Python bytecode
+**/__pycache__/
+**/*.pyc
+
+# Test / editor artifacts
+.pytest_cache/
+.DS_Store
+Thumbs.db

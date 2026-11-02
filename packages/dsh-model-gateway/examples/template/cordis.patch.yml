@@ -1,0 +1,35 @@
+# Copy this row into your own bundle's cordis.patch.yml, or install a bundle
+# whose patch contains it.  Paths are resolved from `cwd`; change them.
+- insert:
+    - id: my-model-gateway
+      name: '@local/dsh-model-gateway'
+      config:
+        gateways:
+          my-model:
+            displayName: My Model
+            command: python
+            script: H:/path/to/server.py
+            cwd: H:/path/to
+            port: 8099
+            health:
+              type: http
+              url: http://127.0.0.1:8099/health
+              startupTimeoutMs: 30000
+              intervalMs: 5000
+              failureThreshold: 3
+            restart:
+              enabled: true
+              maxRestarts: 5
+              windowMs: 3600000
+              initialDelayMs: 1000
+              maxDelayMs: 30000
+            provider:
+              route: my-model
+              displayName: My Model Gateway
+              baseURL: http://127.0.0.1:8099/v1
+              requestPath: /chat/completions
+              models:
+                - id: my-model
+                  name: My Model
+                  contextWindow: 131072
+                  maxTokens: 8192

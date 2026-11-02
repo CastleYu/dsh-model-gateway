@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "模型网关示例",
+    "description": "托管内置 OpenCode Go 网关并注册为 DSH 模型路由的完整示例。"
+  }
+}

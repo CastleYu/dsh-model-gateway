@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Model Gateway Demo",
+    "description": "Worked example that supervises the bundled OpenCode Go gateway and registers it as a DSH model route."
+  }
+}

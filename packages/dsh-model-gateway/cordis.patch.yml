@@ -1,0 +1,8 @@
+# The framework row stays dormant until a gateway is configured.  Deployments
+# usually override this row's `config.gateways` from their own patch layer, or
+# insert a second row (as the bundled demo does) with a complete config.
+- insert:
+    - id: model-gateway
+      name: '@local/dsh-model-gateway'
+      config:
+        gateways: {}
