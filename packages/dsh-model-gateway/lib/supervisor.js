@@ -399,6 +399,16 @@ export class GatewaySupervisor extends EventEmitter {
 
   async recoverFromUnhealthy(detail) {
     if (this.stopping || this.disposed || !this.desiredRunning) return
+    if (!this.config.restart.enabled) {
+      this.lastError = `health check failed and automatic restart is disabled: ${detail}`
+      this.health.ok = false
+      this.health.detail = detail
+      this.health.consecutiveFailures = 0
+      this.log('error', this.lastError)
+      this.trace('watchdog-disabled', { detail })
+      this.emitChange()
+      return
+    }
     this.log('warn', `health watchdog is recycling the gateway: ${detail}`)
     const now = Date.now()
     this.restartHistory = this.restartHistory.filter((at) => now - at < this.config.restart.windowMs)
@@ -443,6 +453,16 @@ export class GatewaySupervisor extends EventEmitter {
       this.health.detail = 'process exited'
       this.emitChange()
       return
+    }
+
+    // Readiness must not survive the process it is checking. Without this,
+    // health:false would resolve start() as running after the 200ms settle
+    // delay even though the child is already gone, and health-enabled
+    // startups would keep polling a dead PID until the full timeout.
+    if (this.state === 'starting') {
+      try {
+        this.startAbort?.abort(new Error(`gateway process exited during startup (code=${code ?? 'null'}, signal=${signal ?? 'null'})`))
+      } catch {}
     }
 
     this.state = 'crashed'

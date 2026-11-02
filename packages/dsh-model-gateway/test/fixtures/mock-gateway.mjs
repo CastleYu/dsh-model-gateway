@@ -33,6 +33,7 @@ const server = http.createServer(async (req, res) => {
     let parsed = {}
     try { parsed = JSON.parse(body) } catch {}
     const wantsTool = parsed?.tools?.length > 0 && JSON.stringify(parsed?.messages ?? []).includes('TOOL_CALL')
+    const truncated = url.searchParams.get('truncated') === '1'
     res.writeHead(200, {
       'content-type': 'text/event-stream',
       'cache-control': 'no-cache',
@@ -41,6 +42,10 @@ const server = http.createServer(async (req, res) => {
     const send = (payload) => res.write(`data: ${JSON.stringify(payload)}\n\n`)
     send({ choices: [{ delta: { reasoning_content: 'test reasoning' } }] })
     send({ choices: [{ delta: { content: 'hello from mock gateway' } }] })
+    if (truncated) {
+      res.end()
+      return
+    }
     if (wantsTool) {
       send({
         choices: [{

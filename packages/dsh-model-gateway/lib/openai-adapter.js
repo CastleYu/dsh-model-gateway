@@ -631,8 +631,8 @@ export function createOpenAIAdapter({ config, supervisor, ctx, log }) {
           // after the finish_reason chunk.
         }
       }
-      if (!state.done && state.finishReason === undefined && !state.sawContent) {
-        throw gatewayError('gateway stream ended without a finish reason', 'TRANSPORT')
+      if (!state.done && state.finishReason === undefined) {
+        throw gatewayError('gateway stream ended before a completion marker ([DONE] or finish_reason)', 'TRANSPORT')
       }
       if (!state.sawContent) throw gatewayError('gateway stream produced no content', 'EMPTY_RESPONSE')
       if (state.usage !== undefined) yield { type: 'usage', usage: state.usage }

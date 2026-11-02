@@ -51,7 +51,7 @@ async function waitFor(check, { timeout = 15_000, interval = 100, label = 'condi
   throw new Error(`timed out waiting for ${label}; last=${last instanceof Error ? last.message : JSON.stringify(last)}`)
 }
 
-function rawConfig(port, { failFile = '', health = {}, restart = {} } = {}) {
+function rawConfig(port, { failFile = '', health = {}, restart = {}, requestPath = '/chat/completions' } = {}) {
   return {
     gateways: {
       test: {
@@ -88,7 +88,7 @@ function rawConfig(port, { failFile = '', health = {}, restart = {} } = {}) {
           route: 'gateway-test',
           displayName: 'Test Route',
           baseURL: `http://127.0.0.1:${port}/v1`,
-          requestPath: '/chat/completions',
+          requestPath,
           models: [{
             id: 'mock-model',
             name: 'Mock Model',
@@ -205,6 +205,51 @@ test('supervisor starts, adapter streams reasoning/text/usage, and stop releases
   assert.throws(() => process.kill(pid, 0), /ESRCH|invalid argument/)
 })
 
+test('truncated SSE without [DONE] or finish_reason is a transport failure', async (t) => {
+  const port = await freePort()
+  const config = normalizeConfig(rawConfig(port, { requestPath: '/chat/completions?truncated=1' }), { packageDir }).gateways[0]
+  const supervisor = new GatewaySupervisor({ config, ctx: fakeCtx(), packageDir })
+  t.after(async () => { await supervisor.dispose() })
+
+  await supervisor.start('test')
+  const adapter = createOpenAIAdapter({ config, supervisor, ctx: fakeCtx(), log: supervisor.logs })
+  await assert.rejects(
+    async () => {
+      for await (const _chunk of adapter.stream({
+        provider: 'gateway-test',
+        model: 'mock-model',
+        messages: [{ role: 'user', content: [{ type: 'text', text: 'hello' }] }],
+        maxTokens: 128,
+      })) {
+        // consume until the truncated stream ends
+      }
+    },
+    (error) => error.code === 'TRANSPORT' && /completion marker/.test(error.message),
+  )
+})
+
+test('child exit during readiness aborts start instead of reporting running', async (t) => {
+  const config = normalizeConfig({
+    gateways: {
+      early: {
+        command: process.execPath,
+        args: ['-e', 'process.exit(1)'],
+        cwd: testDir,
+        health: false,
+        restart: false,
+        provider: false,
+        logs: { maxLines: 50 },
+      },
+    },
+  }, { packageDir }).gateways[0]
+  const supervisor = new GatewaySupervisor({ config, ctx: fakeCtx(), packageDir })
+  t.after(async () => { await supervisor.dispose() })
+
+  await assert.rejects(supervisor.start('test'), /exited during startup|startup/i)
+  assert.equal(supervisor.snapshot().state, 'failed')
+  assert.equal(supervisor.snapshot().pid, undefined)
+})
+
 test('crashed gateway is automatically restarted with a new pid', async (t) => {
   const port = await freePort()
   const config = normalizeConfig(rawConfig(port, { restart: { initialDelayMs: 100, maxDelayMs: 300 } }), { packageDir }).gateways[0]
@@ -240,6 +285,32 @@ test('restart budget stops an endlessly crashing gateway in failed state', async
   await fetch(`http://127.0.0.1:${port}/crash`)
   await waitFor(() => supervisor.snapshot().state === 'failed', { label: 'failed after budget', timeout: 10_000 })
   assert.match(supervisor.snapshot().lastError, /restart budget exhausted/)
+})
+
+test('disabled restart policy is honored by the health watchdog', async (t) => {
+  const port = await freePort()
+  const failFile = path.join(os.tmpdir(), `dsh-gateway-no-restart-${process.pid}-${Date.now()}`)
+  const config = normalizeConfig(rawConfig(port, {
+    failFile,
+    health: { intervalMs: 250, failureThreshold: 2, startupTimeoutMs: 5_000 },
+    restart: { enabled: false },
+  }), { packageDir }).gateways[0]
+  const supervisor = new GatewaySupervisor({ config, ctx: fakeCtx(), packageDir })
+  t.after(async () => {
+    try { fs.rmSync(failFile, { force: true }) } catch {}
+    await supervisor.dispose()
+  })
+
+  await supervisor.start('test')
+  const pid = supervisor.snapshot().pid
+  fs.writeFileSync(failFile, 'fail')
+  await waitFor(() => supervisor.snapshot().health.ok === false && /automatic restart is disabled/.test(supervisor.snapshot().lastError ?? ''), {
+    label: 'disabled watchdog diagnostic',
+    timeout: 10_000,
+  })
+  assert.equal(supervisor.snapshot().state, 'running')
+  assert.equal(supervisor.snapshot().pid, pid)
+  assert.equal(supervisor.snapshot().restarts, 0)
 })
 
 test('health watchdog recycles a gateway that stops answering health checks', async (t) => {
