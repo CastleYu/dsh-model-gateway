@@ -80,7 +80,6 @@ function rawConfig(port, { failFile = '', health = {}, restart = {}, requestPath
           windowMs: 60_000,
           initialDelayMs: 150,
           maxDelayMs: 800,
-          stableAfterMs: 60_000,
           ...restart,
         },
         logs: { maxLines: 500, maxBytes: 65_536 },
@@ -386,6 +385,29 @@ test('disabled restart policy is honored by the health watchdog', async (t) => {
   assert.equal(supervisor.snapshot().state, 'running')
   assert.equal(supervisor.snapshot().pid, pid)
   assert.equal(supervisor.snapshot().restarts, 0)
+})
+
+test('exhausted health restart budget stops the unhealthy child and reports failed', async (t) => {
+  const port = await freePort()
+  const failFile = path.join(os.tmpdir(), `dsh-gateway-health-budget-${process.pid}-${Date.now()}`)
+  const config = normalizeConfig(rawConfig(port, {
+    failFile,
+    health: { intervalMs: 250, failureThreshold: 2, startupTimeoutMs: 5_000 },
+    restart: { maxRestarts: 0, initialDelayMs: 50, maxDelayMs: 100 },
+  }), { packageDir }).gateways[0]
+  const supervisor = new GatewaySupervisor({ config, ctx: fakeCtx(), packageDir })
+  t.after(async () => {
+    try { fs.rmSync(failFile, { force: true }) } catch {}
+    await supervisor.dispose()
+  })
+
+  await supervisor.start('test')
+  fs.writeFileSync(failFile, 'fail')
+  await waitFor(() => supervisor.snapshot().state === 'failed' && supervisor.snapshot().pid === undefined, {
+    label: 'failed and stopped after health budget',
+    timeout: 10_000,
+  })
+  assert.match(supervisor.snapshot().lastError, /restart budget exhausted/)
 })
 
 test('health watchdog recycles a gateway that stops answering health checks', async (t) => {

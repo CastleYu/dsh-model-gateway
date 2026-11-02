@@ -196,7 +196,6 @@ config:
 | `timeoutMs` | 2500 | 单次检查超时 |
 | `startupTimeoutMs` | 30000 | 启动就绪总超时 |
 | `failureThreshold` | 3 | 连续失败多少次触发回收 |
-| `successThreshold` | 1 | 连续成功多少次视为健康 |
 | `expectStatus` | 2xx-4xx | 期望状态码 |
 | `bodyIncludes` | 无 | 响应体必须包含的标记 |
 | `allowAnyStatus` | `true` | 2xx-4xx 都算存活 |
@@ -210,7 +209,6 @@ config:
 | `windowMs` | `3600000` | 滑动窗口 |
 | `initialDelayMs` | `1000` | 首次退避 |
 | `maxDelayMs` | `30000` | 退避上限 |
-| `stableAfterMs` | `60000` | 保留字段；重启预算按 `windowMs` 滑动窗口计算 |
 
 `logs`：
 
@@ -296,10 +294,11 @@ packages/dsh-model-gateway/logs/opencode-go.jsonl
 
 安全约束：
 
-- trace 对 `authorization`、`apiKey`、`token`、`cookie` 等**精确键名**做脱敏；
+- trace 对 `authorization`、`apiKey`、`token`、`cookie` 等键名，以及文本中的 `Bearer ...` / `sk-...` 等凭据模式做脱敏；
+- **stdout/stderr 是原样捕获，不做脱敏**：网关自身不要把密钥打印到标准输出；
 - 默认 `summary` 不记录完整 prompt/响应体；
 - `verbose` 会记录截断后的请求体和 SSE 事件，只应在定位协议问题时临时打开；
-- 日志环有行数/字节上限，落盘文件不做轮转，生产环境建议配合外部轮转。
+- 日志环有行数/字节上限；落盘 JSONL 是 append-only，不做轮转，生产环境建议配合外部轮转或关闭 `logs.file`。
 
 ## 工具
 
@@ -329,7 +328,7 @@ packages/dsh-model-gateway/logs/opencode-go.jsonl
 
 本仓库完成时已实际验证：
 
-- `node --test packages/dsh-model-gateway/test/gateway.test.mjs`：13/13 通过（启动/流式、截断流、损坏 SSE、length 工具调用、启动预检、启动期退出、崩溃重启、重启预算耗尽、健康看门狗、禁用重启、配置、SSE、脱敏）；
+- `node --test packages/dsh-model-gateway/test/gateway.test.mjs`：14/14 通过（启动/流式、截断流、损坏 SSE、length 工具调用、启动预检、启动期退出、崩溃重启、重启预算耗尽、健康看门狗、禁用重启、健康预算耗尽停止子进程、配置、SSE、脱敏）；
 - `gateway_status`：`running`、健康、PID、模型路由；
 - `gateway_selftest`：真实 OpenCode Go 流式响应，返回 `gateway ok` / `restart ok` / `autostart ok`；
 - 手动 `taskkill` 网关进程后：插件在约 1 秒内拉起新 PID，`restarts: 1`，随后自测成功；

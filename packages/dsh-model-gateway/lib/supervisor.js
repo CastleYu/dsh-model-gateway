@@ -93,9 +93,7 @@ export class GatewaySupervisor extends EventEmitter {
       detail: 'not checked',
       lastCheckAt: undefined,
       consecutiveFailures: 0,
-      consecutiveSuccesses: 0,
     }
-    this.stableTimer = undefined
   }
 
   get route() {
@@ -195,7 +193,7 @@ export class GatewaySupervisor extends EventEmitter {
           this.state = 'running'
           this.startedAt = Date.now()
           this.pid = undefined
-          this.health = { ok: true, detail: 'reused existing listener', lastCheckAt: Date.now(), consecutiveFailures: 0, consecutiveSuccesses: 1 }
+          this.health = { ok: true, detail: 'reused existing listener', lastCheckAt: Date.now(), consecutiveFailures: 0 }
           this.trace('reuse-existing', { host: this.config.host, port: this.config.port })
           this._startHealthLoop()
           this.emitChange()
@@ -239,7 +237,7 @@ export class GatewaySupervisor extends EventEmitter {
     this.state = 'starting'
     this.startedAt = undefined
     this.lastError = undefined
-    this.health = { ok: false, detail: 'starting', lastCheckAt: undefined, consecutiveFailures: 0, consecutiveSuccesses: 0 }
+    this.health = { ok: false, detail: 'starting', lastCheckAt: undefined, consecutiveFailures: 0 }
     this.startAbort = new AbortController()
     this.emitChange()
     this.log('info', `starting${reason === 'manual' ? '' : ` (${reason})`}: ${this.config.command}${this.config.script === undefined ? '' : ` ${this.config.script}`}`)
@@ -282,6 +280,11 @@ export class GatewaySupervisor extends EventEmitter {
 
     try {
       await this.waitReady(this.startAbort.signal)
+      // The child can exit between the readiness probe and the state commit.
+      // Never overwrite the exit handler's failure state with a dead `running`.
+      if (this.startAbort.signal.aborted || this.child !== child || child.exitCode !== null || child.signalCode !== null) {
+        throw this.startAbort.signal.reason ?? errorWithCode('gateway process exited before startup committed', 'STARTUP_EXITED')
+      }
     } catch (error) {
       this.log('error', `startup failed: ${String(error?.message ?? error)}`)
       this.trace('startup-failed', { message: String(error?.message ?? error), code: error?.code })
@@ -298,7 +301,7 @@ export class GatewaySupervisor extends EventEmitter {
     this.startedAt = Date.now()
     this.lastError = undefined
     this.lastExit = undefined
-    this.health = { ok: true, detail: 'ready', lastCheckAt: Date.now(), consecutiveFailures: 0, consecutiveSuccesses: 1 }
+    this.health = { ok: true, detail: 'ready', lastCheckAt: Date.now(), consecutiveFailures: 0 }
     this.startAbort = undefined
     this.log('info', `ready (pid ${this.pid ?? 'external'}) on ${this.baseURL ?? `${this.config.host}:${this.config.port}`}`)
     this.trace('ready', { pid: this.pid, elapsedMs: Date.now() - this.startedAt })
@@ -386,11 +389,9 @@ export class GatewaySupervisor extends EventEmitter {
       if (result.ok) {
         this.health.ok = true
         this.health.consecutiveFailures = 0
-        this.health.consecutiveSuccesses += 1
         return
       }
       this.health.ok = false
-      this.health.consecutiveSuccesses = 0
       this.health.consecutiveFailures += 1
       this.trace('health-failed', {
         detail: result.detail,
@@ -422,10 +423,20 @@ export class GatewaySupervisor extends EventEmitter {
     const now = Date.now()
     this.restartHistory = this.restartHistory.filter((at) => now - at < this.config.restart.windowMs)
     if (this.restartHistory.length >= this.config.restart.maxRestarts) {
-      this.state = 'failed'
-      this.lastError = `restart budget exhausted after repeated health failures; last health: ${detail}`
-      this.log('error', this.lastError)
+      const message = `restart budget exhausted after repeated health failures; last health: ${detail}`
+      this.log('error', message)
       this.trace('watchdog-budget-exhausted', { detail, attempts: this.restartHistory.length })
+      this.desiredRunning = false
+      try {
+        await this.stop({ reason: 'watchdog-budget-exhausted' })
+      } catch (error) {
+        this.log('error', `cannot stop failed gateway: ${String(error?.message ?? error)}`)
+      }
+      this.state = 'failed'
+      this.desiredRunning = false
+      this.lastError = message
+      this.health.ok = false
+      this.health.detail = detail
       this.health.consecutiveFailures = 0
       this.emitChange()
       return
@@ -592,7 +603,7 @@ export class GatewaySupervisor extends EventEmitter {
     if (this.child === undefined) {
       this.stopping = false
       if (this.state !== 'failed') this.state = 'stopped'
-      this.health = { ok: false, detail: 'stopped', lastCheckAt: Date.now(), consecutiveFailures: 0, consecutiveSuccesses: 0 }
+      this.health = { ok: false, detail: 'stopped', lastCheckAt: Date.now(), consecutiveFailures: 0 }
       this.emitChange()
       return this.snapshot()
     }
@@ -606,7 +617,7 @@ export class GatewaySupervisor extends EventEmitter {
     } finally {
       this.stopping = false
       this.state = keepDesired ? 'stopped' : 'stopped'
-      this.health = { ok: false, detail: 'stopped', lastCheckAt: Date.now(), consecutiveFailures: 0, consecutiveSuccesses: 0 }
+      this.health = { ok: false, detail: 'stopped', lastCheckAt: Date.now(), consecutiveFailures: 0 }
       this.emitChange()
     }
     return this.snapshot()

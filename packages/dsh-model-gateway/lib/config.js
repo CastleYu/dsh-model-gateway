@@ -116,7 +116,6 @@ function normalizeRestart(raw, field) {
       windowMs: 3_600_000,
       initialDelayMs: 1_000,
       maxDelayMs: 30_000,
-      stableAfterMs: 60_000,
     }
   }
   const source = isPlainObject(raw) ? raw : {}
@@ -126,7 +125,6 @@ function normalizeRestart(raw, field) {
     windowMs: asInteger(source.windowMs, `${field}.windowMs`, 3_600_000, { min: 1 }),
     initialDelayMs: asInteger(source.initialDelayMs, `${field}.initialDelayMs`, 1_000, { min: 1 }),
     maxDelayMs: asInteger(source.maxDelayMs, `${field}.maxDelayMs`, 30_000, { min: 1 }),
-    stableAfterMs: asInteger(source.stableAfterMs, `${field}.stableAfterMs`, 60_000, { min: 1 }),
   }
 }
 
@@ -175,7 +173,6 @@ function normalizeHealth(raw, field, { host, port, baseURL }) {
     timeoutMs: asInteger(source.timeoutMs, `${field}.timeoutMs`, 2_500, { min: 100 }),
     startupTimeoutMs: asInteger(source.startupTimeoutMs, `${field}.startupTimeoutMs`, 30_000, { min: 100 }),
     failureThreshold: asInteger(source.failureThreshold, `${field}.failureThreshold`, 3, { min: 1 }),
-    successThreshold: asInteger(source.successThreshold, `${field}.successThreshold`, 1, { min: 1 }),
     ...(source.bodyIncludes === undefined ? {} : { bodyIncludes: asString(source.bodyIncludes, `${field}.bodyIncludes`) }),
     ...(expectStatus === undefined ? {} : { expectStatus }),
     ...(asBoolean(source.allowAnyStatus, `${field}.allowAnyStatus`, true) === false ? { allowAnyStatus: false } : {}),
@@ -277,11 +274,6 @@ function normalizeProvider(raw, field, { id, host, port, displayName }) {
     maxTokensField: (() => {
       const value = asOptionalString(source.maxTokensField, `${field}.maxTokensField`) ?? 'max_tokens'
       if (value !== 'max_tokens' && value !== 'max_completion_tokens') fail(`${field}.maxTokensField must be "max_tokens" or "max_completion_tokens"`)
-      return value
-    })(),
-    developerRole: (() => {
-      const value = asOptionalString(source.developerRole, `${field}.developerRole`) ?? 'system'
-      if (value !== 'system' && value !== 'developer') fail(`${field}.developerRole must be "system" or "developer"`)
       return value
     })(),
     reasoningFields: asStringArray(source.reasoningFields, `${field}.reasoningFields`, ['reasoning_content', 'reasoning', 'reasoning_text', 'thinking']),

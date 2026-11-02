@@ -38,14 +38,12 @@
               timeoutMs: 2000
               startupTimeoutMs: 20000
               failureThreshold: 3
-              successThreshold: 1
             restart:
               enabled: true
               maxRestarts: 5
               windowMs: 3600000
               initialDelayMs: 1000
               maxDelayMs: 15000
-              stableAfterMs: 60000
             logs:
               maxLines: 4000
               maxBytes: 2097152
