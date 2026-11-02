@@ -130,6 +130,8 @@ test('redacts credentials but preserves token counts', () => {
     inputTokens: 51,
     outputTokens: 31,
     nested: { cookie: 'session=1', reasoningTokens: 26 },
+    message: 'upstream rejected Authorization: Bearer REVIEW_SYNTHETIC_SECRET',
+    detail: 'api_key=sk-abcdefghijklmnop',
   })
   assert.equal(redacted.authorization, '[redacted]')
   assert.equal(redacted.apiKey, '[redacted]')
@@ -138,6 +140,8 @@ test('redacts credentials but preserves token counts', () => {
   assert.equal(redacted.outputTokens, 31)
   assert.equal(redacted.nested.cookie, '[redacted]')
   assert.equal(redacted.nested.reasoningTokens, 26)
+  assert.ok(!redacted.message.includes('REVIEW_SYNTHETIC_SECRET'))
+  assert.ok(!redacted.detail.includes('abcdefghijklmnop'))
 })
 
 test('parses SSE blocks with CRLF, comments and multiple data lines', async () => {
@@ -226,6 +230,77 @@ test('truncated SSE without [DONE] or finish_reason is a transport failure', asy
     },
     (error) => error.code === 'TRANSPORT' && /completion marker/.test(error.message),
   )
+})
+
+test('malformed SSE data is a protocol failure instead of silently dropped content', async (t) => {
+  const port = await freePort()
+  const config = normalizeConfig(rawConfig(port, { requestPath: '/chat/completions?malformed=1' }), { packageDir }).gateways[0]
+  const supervisor = new GatewaySupervisor({ config, ctx: fakeCtx(), packageDir })
+  t.after(async () => { await supervisor.dispose() })
+
+  await supervisor.start('test')
+  const adapter = createOpenAIAdapter({ config, supervisor, ctx: fakeCtx(), log: supervisor.logs })
+  await assert.rejects(
+    async () => {
+      for await (const _chunk of adapter.stream({
+        provider: 'gateway-test',
+        model: 'mock-model',
+        messages: [{ role: 'user', content: [{ type: 'text', text: 'hello' }] }],
+        maxTokens: 128,
+      })) {
+        // consume until the malformed event
+      }
+    },
+    (error) => error.code === 'INVALID_RESPONSE' && /non-JSON SSE/.test(error.message),
+  )
+})
+
+test('explicit length finish wins over incomplete tool-call deltas', async (t) => {
+  const port = await freePort()
+  const config = normalizeConfig(rawConfig(port, { requestPath: '/chat/completions?tool_length=1' }), { packageDir }).gateways[0]
+  const supervisor = new GatewaySupervisor({ config, ctx: fakeCtx(), packageDir })
+  t.after(async () => { await supervisor.dispose() })
+
+  await supervisor.start('test')
+  const adapter = createOpenAIAdapter({ config, supervisor, ctx: fakeCtx(), log: supervisor.logs })
+  const chunks = []
+  for await (const chunk of adapter.stream({
+    provider: 'gateway-test',
+    model: 'mock-model',
+    messages: [{ role: 'user', content: [{ type: 'text', text: 'TOOL_CALL' }] }],
+    tools: [{ name: 'probe', description: 'probe', parameters: { type: 'object', properties: {} } }],
+    maxTokens: 128,
+  })) {
+    chunks.push(chunk)
+  }
+  assert.equal(chunks.find((chunk) => chunk.type === 'finish').reason.kind, 'max-tokens')
+  assert.ok(chunks.some((chunk) => chunk.type === 'tool-call-delta' && chunk.id === 'call_truncated'))
+})
+
+test('preflight failure records state and lastError instead of staying idle', async (t) => {
+  const config = normalizeConfig({
+    gateways: {
+      missing: {
+        command: process.execPath,
+        script: path.join(testDir, 'missing-server.py'),
+        cwd: testDir,
+        health: false,
+        restart: false,
+        provider: false,
+        logs: { maxLines: 50 },
+      },
+    },
+  }, { packageDir }).gateways[0]
+  const supervisor = new GatewaySupervisor({ config, ctx: fakeCtx(), packageDir })
+  t.after(async () => { await supervisor.dispose() })
+
+  await assert.rejects(
+    supervisor.start('test'),
+    (error) => error.code === 'SCRIPT_MISSING' && /script does not exist/.test(error.message),
+  )
+  assert.equal(supervisor.snapshot().state, 'failed')
+  assert.match(supervisor.snapshot().lastError, /script does not exist/)
+  assert.equal(supervisor.snapshot().pid, undefined)
 })
 
 test('child exit during readiness aborts start instead of reporting running', async (t) => {

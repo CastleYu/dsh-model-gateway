@@ -329,7 +329,7 @@ packages/dsh-model-gateway/logs/opencode-go.jsonl
 
 本仓库完成时已实际验证：
 
-- `node --test packages/dsh-model-gateway/test/gateway.test.mjs`：10/10 通过（启动/流式、截断流、启动期退出、崩溃重启、重启预算耗尽、健康看门狗、禁用重启、配置、SSE、脱敏）；
+- `node --test packages/dsh-model-gateway/test/gateway.test.mjs`：13/13 通过（启动/流式、截断流、损坏 SSE、length 工具调用、启动预检、启动期退出、崩溃重启、重启预算耗尽、健康看门狗、禁用重启、配置、SSE、脱敏）；
 - `gateway_status`：`running`、健康、PID、模型路由；
 - `gateway_selftest`：真实 OpenCode Go 流式响应，返回 `gateway ok` / `restart ok` / `autostart ok`；
 - 手动 `taskkill` 网关进程后：插件在约 1 秒内拉起新 PID，`restarts: 1`，随后自测成功；

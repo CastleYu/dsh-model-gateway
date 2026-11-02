@@ -74,22 +74,23 @@ function normalizeUsage(raw) {
 }
 
 function finishReasonFrom(wire, sawToolCall) {
-  if (sawToolCall) return { kind: 'tool-calls' }
   switch (wire) {
     case 'length':
     case 'max_tokens':
+      // An explicit output cap wins over tool deltas: the tool arguments may
+      // be incomplete and must not be handed to the executor as a finished call.
       return { kind: 'max-tokens' }
     case 'tool_calls':
     case 'function_call':
       return { kind: 'tool-calls' }
     case 'content_filter':
-    case 'stop':
-    case null:
-    case undefined:
       return { kind: 'stop' }
     default:
-      return { kind: 'stop' }
+      break
   }
+  // No explicit truncation/stop signal: tool deltas mean the provider intends
+  // a tool-call turn, otherwise this is a normal stop.
+  return sawToolCall ? { kind: 'tool-calls' } : { kind: 'stop' }
 }
 
 function mapHTTPError(status, body, headers) {
@@ -617,12 +618,13 @@ export function createOpenAIAdapter({ config, supervisor, ctx, log }) {
           state.done = true
           break
         }
+        if (event.data.trim().length === 0) continue
         let payload
         try {
           payload = JSON.parse(event.data)
         } catch {
           log.trace('sse-unparseable', { data: event.data.slice(0, 500) })
-          continue
+          throw gatewayError('gateway sent a non-JSON SSE data event', 'INVALID_RESPONSE')
         }
         if (trace === 'verbose') log.trace('sse', payload)
         for (const chunk of emitDelta(payload, state)) yield chunk

@@ -9,12 +9,24 @@ import path from 'node:path'
 
 const SECRET_KEY_RE = /^(authorization|api[-_]?key|access[-_]?token|refresh[-_]?token|id[-_]?token|token|secret|password|cookie|set-cookie)$/i
 
+/**
+ * Redact credentials embedded in free text, such as an upstream error body
+ * echoed into a log message. Key-based redaction alone cannot see these.
+ */
+function redactText(value) {
+  return value
+    .replace(/\b(Bearer\s+)[A-Za-z0-9._~+/=-]{8,}/gi, '$1[redacted]')
+    .replace(/\b(?:sk|gho|ghp|ghs|xai|pk)-[A-Za-z0-9_-]{8,}\b/g, '[redacted]')
+    .replace(/\b((?:api[_-]?key|access[_-]?token|refresh[_-]?token|token|secret|authorization)\s*[:=]\s*)(["']?)[^"'\s,;}]{6,}/gi, '$1$2[redacted]')
+}
+
 export function redact(value, depth = 0) {
   if (depth > 8) return '[depth-limit]'
   if (value === null || value === undefined) return value
   if (typeof value === 'string') {
-    if (value.length > 4_000) return `${value.slice(0, 4_000)}…[truncated]`
-    return value
+    const safe = redactText(value)
+    if (safe.length > 4_000) return `${safe.slice(0, 4_000)}…[truncated]`
+    return safe
   }
   if (typeof value !== 'object') return value
   if (Array.isArray(value)) return value.slice(0, 200).map((entry) => redact(entry, depth + 1))

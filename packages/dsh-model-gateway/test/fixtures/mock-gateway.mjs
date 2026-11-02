@@ -34,6 +34,8 @@ const server = http.createServer(async (req, res) => {
     try { parsed = JSON.parse(body) } catch {}
     const wantsTool = parsed?.tools?.length > 0 && JSON.stringify(parsed?.messages ?? []).includes('TOOL_CALL')
     const truncated = url.searchParams.get('truncated') === '1'
+    const malformed = url.searchParams.get('malformed') === '1'
+    const toolLength = url.searchParams.get('tool_length') === '1'
     res.writeHead(200, {
       'content-type': 'text/event-stream',
       'cache-control': 'no-cache',
@@ -43,6 +45,33 @@ const server = http.createServer(async (req, res) => {
     send({ choices: [{ delta: { reasoning_content: 'test reasoning' } }] })
     send({ choices: [{ delta: { content: 'hello from mock gateway' } }] })
     if (truncated) {
+      res.end()
+      return
+    }
+    if (malformed) {
+      res.write('data: {broken-json}\n\n')
+      res.write('data: [DONE]\n\n')
+      res.end()
+      return
+    }
+    if (toolLength) {
+      send({
+        choices: [{
+          delta: {
+            tool_calls: [{
+              index: 0,
+              id: 'call_truncated',
+              function: {
+                name: parsed.tools?.[0]?.function?.name ?? 'probe',
+                arguments: '{"x":',
+              },
+            }],
+          },
+          finish_reason: 'length',
+        }],
+      })
+      send({ choices: [], usage: { prompt_tokens: 11, completion_tokens: 7, total_tokens: 18 } })
+      res.write('data: [DONE]\n\n')
       res.end()
       return
     }

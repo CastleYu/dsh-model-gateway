@@ -201,15 +201,24 @@ export class GatewaySupervisor extends EventEmitter {
           this.emitChange()
           return this.snapshot()
         }
-        throw errorWithCode(`port ${this.config.host}:${this.config.port} is already in use`, 'PORT_IN_USE')
+        throw this._startFailure(
+          errorWithCode(`port ${this.config.host}:${this.config.port} is already in use`, 'PORT_IN_USE'),
+          'PORT_IN_USE',
+        )
       }
     }
 
     if (!fs.existsSync(this.config.cwd)) {
-      throw errorWithCode(`working directory does not exist: ${this.config.cwd}`, 'CWD_MISSING')
+      throw this._startFailure(
+        errorWithCode(`working directory does not exist: ${this.config.cwd}`, 'CWD_MISSING'),
+        'CWD_MISSING',
+      )
     }
     if (this.config.script !== undefined && !fs.existsSync(this.config.script)) {
-      throw errorWithCode(`gateway script does not exist: ${this.config.script}`, 'SCRIPT_MISSING')
+      throw this._startFailure(
+        errorWithCode(`gateway script does not exist: ${this.config.script}`, 'SCRIPT_MISSING'),
+        'SCRIPT_MISSING',
+      )
     }
 
     const args = this.config.script === undefined
@@ -542,6 +551,16 @@ export class GatewaySupervisor extends EventEmitter {
       this.log('warn', `graceful stop timed out after ${graceMs}ms; forcing`)
       await killTree(child, { force: true, timeoutMs: 5_000 })
       await waitForExit(child, 2_000)
+    }
+    // The direct child can exit while descendants in the same process group
+    // ignore SIGTERM. Re-check the group independently of that exit and force
+    // any survivors, otherwise a documented process-tree cleanup leaks them.
+    if (process.platform !== 'win32') {
+      try {
+        process.kill(-child.pid, 0)
+        await killTree(child, { force: true, timeoutMs: 5_000 })
+        await waitForExit(child, 1_000)
+      } catch {}
     }
     if (this.child === child) {
       this.child = undefined

@@ -152,9 +152,9 @@ async function run(command, args, timeoutMs) {
  */
 export async function killTree(child, { force = false, timeoutMs = 8_000 } = {}) {
   if (child === undefined || child.pid === undefined) return { ok: true, detail: 'no process' }
-  if (child.exitCode !== null || child.signalCode !== null) return { ok: true, detail: 'already exited' }
 
   if (process.platform === 'win32') {
+    if (child.exitCode !== null || child.signalCode !== null) return { ok: true, detail: 'already exited' }
     const args = ['/PID', String(child.pid), '/T']
     if (force) args.push('/F')
     const result = await run('taskkill', args, timeoutMs)
