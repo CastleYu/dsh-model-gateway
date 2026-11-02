@@ -35,6 +35,8 @@ packages/
 
 ## 快速开始
 
+> 想要“照着命令复制就能跑”的版本：见仓库根目录 [QUICKSTART.md](../../QUICKSTART.md)。下面保留配置与生命周期细节。
+
 ### 1. 安装框架
 
 在 DSH 里对 `packages/dsh-model-gateway` 执行 Plugin Manager 的 `install_bundle`。它只插入一个空的 `model-gateway` 行，此时插件处于 dormant 状态。

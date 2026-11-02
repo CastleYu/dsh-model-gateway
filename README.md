@@ -1,5 +1,7 @@
 # DSH Model Gateway
 
+> **第一次使用？** 从 [QUICKSTART.md](QUICKSTART.md) 开始：三条复制命令式路径，分别覆盖 mock 验证、真实 OpenCode Go、自定义网关。
+
 A Cordis/DSH Host plugin framework that turns any local model gateway process into a managed DSH model route.
 
 It owns the full lifecycle of a gateway:
@@ -23,7 +25,11 @@ packages/
 
 ## Getting started
 
-Read the framework guide:
+Start with the copy-paste guide:
+
+- [QUICKSTART.md](QUICKSTART.md)
+
+Then read the framework guide:
 
 - [Framework README](packages/dsh-model-gateway/README.md)
 - [Worked OpenCode Go gateway](packages/dsh-model-gateway/examples/opencode-go/server.py)
