@@ -32,6 +32,7 @@ Start with the copy-paste guide:
 Then read the framework guide:
 
 - [Framework README](packages/dsh-model-gateway/README.md)
+- [Adapter guide](packages/dsh-model-gateway/ADAPTER.md) — the full gateway protocol contract, SSE grammar, tool-call/reasoning mapping and troubleshooting
 - [Worked OpenCode Go gateway](packages/dsh-model-gateway/examples/opencode-go/server.py)
 - [Demo bundle patch](packages/dsh-model-gateway-demo/cordis.patch.yml)
 - [Custom gateway template](packages/dsh-model-gateway/examples/template/server.py)
@@ -42,7 +43,8 @@ The demo gateway runs in `auto` mode: set `OPENCODE_GO_API_KEY` in the DSH launc
 
 ## Verification
 
-- `node --test packages/dsh-model-gateway/test/gateway.test.mjs` — 15/15 passing.
+- `node --test packages/dsh-model-gateway/test/gateway.test.mjs` — 16/16 passing.
+- `node packages/dsh-model-gateway/scripts/conformance.mjs <url>` — protocol conformance for a running gateway (both bundled examples pass).
 - Live DSH validation: autostart, health check, crash restart, `startOnRequest`, real OpenCode Go streaming (`deepseek-v4.1-flash`, `glm-5.3-flash`), and internal log inspection.
 
 ## Scope and limits

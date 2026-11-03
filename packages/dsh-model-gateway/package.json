@@ -1,6 +1,6 @@
 {
   "name": "@local/dsh-model-gateway",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "private": true,
   "type": "module",
   "description": "Supervise local model gateway processes and expose them as OpenAI-compatible DSH model routes.",
@@ -12,12 +12,18 @@
   "files": [
     "index.js",
     "lib/*.js",
+    "scripts/*.mjs",
     "cordis.patch.yml",
     "locale/*.json",
     "icon.svg",
     "examples/**/*",
-    "README.md"
+    "README.md",
+    "ADAPTER.md"
   ],
+  "scripts": {
+    "test": "node --test test/gateway.test.mjs",
+    "conformance": "node scripts/conformance.mjs"
+  },
   "engines": {
     "node": ">=22"
   },

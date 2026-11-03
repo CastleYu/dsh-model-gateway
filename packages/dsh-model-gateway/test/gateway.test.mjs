@@ -230,6 +230,31 @@ test('supervisor starts, adapter streams reasoning/text/usage, and stop releases
   assert.ok(toolChunks.some((chunk) => chunk.type === 'tool-call-delta' && chunk.name === 'probe'))
   assert.equal(toolChunks.find((chunk) => chunk.type === 'finish').reason.kind, 'tool-calls')
 
+  // Streamed blocks must be opened and closed explicitly: `block-end` is the
+  // authoritative final block for the UI and for replay.
+  const blocks = []
+  for await (const chunk of adapter.stream({
+    provider: 'gateway-test',
+    model: 'mock-model',
+    messages: [{ role: 'user', content: [{ type: 'text', text: 'hello' }] }],
+    maxTokens: 128,
+  })) {
+    if (chunk.type === 'block-start' || chunk.type === 'block-end') blocks.push(chunk)
+  }
+  const starts = blocks.filter((chunk) => chunk.type === 'block-start')
+  const ends = blocks.filter((chunk) => chunk.type === 'block-end')
+  assert.deepEqual(starts.map((chunk) => chunk.index), ends.map((chunk) => chunk.index))
+  assert.deepEqual(starts.map((chunk) => chunk.blockType), ['reasoning', 'text'])
+  assert.deepEqual(ends.map((chunk) => chunk.block), [
+    { type: 'reasoning', text: 'test reasoning' },
+    { type: 'text', text: 'hello from mock gateway' },
+  ])
+
+  // A closed tool-call block must carry the fully assembled arguments string.
+  const toolEnd = toolChunks.find((chunk) => chunk.type === 'block-end' && chunk.block.type === 'tool-call')
+  assert.equal(toolEnd.block.name, 'probe')
+  assert.deepEqual(JSON.parse(toolEnd.block.arguments), {})
+
   const pid = supervisor.snapshot().pid
   await supervisor.stop({ reason: 'test' })
   assert.equal(supervisor.snapshot().state, 'stopped')
@@ -280,6 +305,29 @@ test('malformed SSE data is a protocol failure instead of silently dropped conte
       }
     },
     (error) => error.code === 'INVALID_RESPONSE' && /non-JSON SSE/.test(error.message),
+  )
+})
+
+test('in-band error event after HTTP 200 surfaces as PROVIDER_ERROR', async (t) => {
+  const port = await freePort()
+  const config = normalizeConfig(rawConfig(port, { requestPath: '/chat/completions?stream_error=1' }), { packageDir }).gateways[0]
+  const supervisor = new GatewaySupervisor({ config, ctx: fakeCtx(), packageDir })
+  t.after(async () => { await supervisor.dispose() })
+
+  await supervisor.start('test')
+  const adapter = createOpenAIAdapter({ config, supervisor, ctx: fakeCtx(), log: supervisor.logs })
+  await assert.rejects(
+    async () => {
+      for await (const _chunk of adapter.stream({
+        provider: 'gateway-test',
+        model: 'mock-model',
+        messages: [{ role: 'user', content: [{ type: 'text', text: 'hello' }] }],
+        maxTokens: 128,
+      })) {
+        // consume until the in-band error
+      }
+    },
+    (error) => error.code === 'PROVIDER_ERROR' && /upstream disconnected/.test(error.message),
   )
 })
 

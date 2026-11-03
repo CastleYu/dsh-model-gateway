@@ -329,6 +329,14 @@ DSH llm StreamChunk
 
 只要你的 server 最终输出 `data: {...}\n\n` 的 OpenAI Chat Completions 事件，DSH 侧不需要改代码。
 
+协议细节（SSE 帧语法、工具调用分槽、reasoning 字段、错误信封、排障表）见 [ADAPTER.md](packages/dsh-model-gateway/ADAPTER.md)。
+
+装进 DSH 之前，可以先不装 bundle，直接自证协议：
+
+```powershell
+node packages/dsh-model-gateway/scripts/conformance.mjs http://127.0.0.1:8099
+```
+
 ---
 
 ## 排错表

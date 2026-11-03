@@ -36,6 +36,7 @@ const server = http.createServer(async (req, res) => {
     const truncated = url.searchParams.get('truncated') === '1'
     const malformed = url.searchParams.get('malformed') === '1'
     const toolLength = url.searchParams.get('tool_length') === '1'
+    const streamError = url.searchParams.get('stream_error') === '1'
     res.writeHead(200, {
       'content-type': 'text/event-stream',
       'cache-control': 'no-cache',
@@ -51,6 +52,13 @@ const server = http.createServer(async (req, res) => {
     if (malformed) {
       res.write('data: {broken-json}\n\n')
       res.write('data: [DONE]\n\n')
+      res.end()
+      return
+    }
+    if (streamError) {
+      // HTTP is already 200, so a mid-stream failure can only travel as an
+      // in-band error event; emitting [DONE] instead would fake success.
+      send({ error: { message: 'upstream disconnected', code: 'upstream' } })
       res.end()
       return
     }

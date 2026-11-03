@@ -429,6 +429,33 @@ export function createOpenAIAdapter({ config, supervisor, ctx, log }) {
     return body
   }
 
+  // Every block is opened with `block-start` and closed with `block-end` carrying
+  // the assembled block, matching the shape both shipped adapters produce. The
+  // assembler tolerates delta-only streams, but `block-end` is the authoritative
+  // final block for the UI and for replay, so a gateway adapter should emit it.
+  function openBlock(state, chunks, blockType) {
+    const index = state.nextBlock++
+    state.blocks.set(index, { type: blockType, text: '', arguments: '' })
+    chunks.push({ type: 'block-start', index, blockType })
+    return index
+  }
+
+  function* closeBlocks(state) {
+    const indexes = [...state.blocks.keys()].sort((left, right) => left - right)
+    for (const index of indexes) {
+      const entry = state.blocks.get(index)
+      if (entry.type === 'tool-call') {
+        yield {
+          type: 'block-end',
+          index,
+          block: { type: 'tool-call', id: entry.id, name: entry.name, arguments: entry.arguments },
+        }
+      } else {
+        yield { type: 'block-end', index, block: { type: entry.type, text: entry.text } }
+      }
+    }
+  }
+
   function emitDelta(payload, state) {
     const chunks = []
     if (payload?.error !== undefined) {
@@ -447,9 +474,10 @@ export function createOpenAIAdapter({ config, supervisor, ctx, log }) {
       .find((value) => typeof value === 'string' && value.length > 0)
     if (reasoning !== undefined) {
       if (state.reasoningIndex === -1) {
-        state.reasoningIndex = state.nextBlock++
+        state.reasoningIndex = openBlock(state, chunks, 'reasoning')
         state.textIndex = -1
       }
+      state.blocks.get(state.reasoningIndex).text += reasoning
       state.sawContent = true
       chunks.push({ type: 'reasoning-delta', index: state.reasoningIndex, text: reasoning })
     }
@@ -460,9 +488,10 @@ export function createOpenAIAdapter({ config, supervisor, ctx, log }) {
     }
     if (text.length > 0) {
       if (state.textIndex === -1) {
-        state.textIndex = state.nextBlock++
+        state.textIndex = openBlock(state, chunks, 'text')
         state.reasoningIndex = -1
       }
+      state.blocks.get(state.textIndex).text += text
       state.sawContent = true
       chunks.push({ type: 'text-delta', index: state.textIndex, text })
     }
@@ -472,17 +501,25 @@ export function createOpenAIAdapter({ config, supervisor, ctx, log }) {
       const key = Number.isInteger(call.index) ? call.index : i
       let tool = state.tools.get(key)
       if (tool === undefined) {
+        const index = openBlock(state, chunks, 'tool-call')
+        const entry = state.blocks.get(index)
         tool = {
-          index: state.nextBlock++,
+          index,
           id: typeof call.id === 'string' && call.id.length > 0 ? call.id : `call_${randomUUID().replace(/-/g, '').slice(0, 24)}`,
           name: typeof call.function?.name === 'string' ? call.function.name : '',
         }
+        entry.id = tool.id
+        entry.name = tool.name
         state.tools.set(key, tool)
       } else {
         if (typeof call.id === 'string' && call.id.length > 0) tool.id = call.id
         if (typeof call.function?.name === 'string' && call.function.name.length > 0) tool.name = call.function.name
+        const entry = state.blocks.get(tool.index)
+        entry.id = tool.id
+        entry.name = tool.name
       }
       const argumentsDelta = typeof call.function?.arguments === 'string' ? call.function.arguments : ''
+      state.blocks.get(tool.index).arguments += argumentsDelta
       state.sawToolCall = true
       state.sawContent = true
       chunks.push({
@@ -611,14 +648,16 @@ export function createOpenAIAdapter({ config, supervisor, ctx, log }) {
           textIndex: -1,
           reasoningIndex: -1,
           tools: new Map(),
+          blocks: new Map(),
           sawToolCall: false,
           sawContent: false,
           usage: undefined,
           finishReason: undefined,
         }
         for (const chunk of emitDelta(payload, state)) yield chunk
-        if (state.usage !== undefined) yield { type: 'usage', usage: state.usage }
         if (!state.sawContent) throw gatewayError('gateway returned an empty response', 'EMPTY_RESPONSE')
+        for (const block of closeBlocks(state)) yield block
+        if (state.usage !== undefined) yield { type: 'usage', usage: state.usage }
         yield { type: 'finish', reason: finishReasonFrom(state.finishReason, state.sawToolCall) }
         log.trace('finish', { reason: finishReasonFrom(state.finishReason, state.sawToolCall), usage: state.usage, elapsedMs: Date.now() - started })
         return
@@ -629,6 +668,7 @@ export function createOpenAIAdapter({ config, supervisor, ctx, log }) {
         textIndex: -1,
         reasoningIndex: -1,
         tools: new Map(),
+        blocks: new Map(),
         sawToolCall: false,
         sawContent: false,
         usage: undefined,
@@ -660,6 +700,7 @@ export function createOpenAIAdapter({ config, supervisor, ctx, log }) {
         throw gatewayError('gateway stream ended before a completion marker ([DONE] or finish_reason)', 'TRANSPORT')
       }
       if (!state.sawContent) throw gatewayError('gateway stream produced no content', 'EMPTY_RESPONSE')
+      for (const block of closeBlocks(state)) yield block
       if (state.usage !== undefined) yield { type: 'usage', usage: state.usage }
       const reason = finishReasonFrom(state.finishReason, state.sawToolCall)
       yield { type: 'finish', reason }

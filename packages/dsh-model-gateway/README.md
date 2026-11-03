@@ -36,6 +36,8 @@ packages/
 ## 快速开始
 
 > 想要“照着命令复制就能跑”的版本：见仓库根目录 [QUICKSTART.md](../../QUICKSTART.md)。下面保留配置与生命周期细节。
+>
+> 要接自己的网关：先读 [ADAPTER.md](ADAPTER.md)，再用 `scripts/conformance.mjs` 自证协议。
 
 ### 1. 安装框架
 
@@ -97,6 +99,14 @@ gateway_selftest({ "prompt": "Reply with exactly: gateway ok" })
 | GET | `/v1/models` | 可选；返回 `{ "data": [{ "id": "..." }] }` |
 | POST | `/v1/chat/completions` | 接收 Chat Completions，`stream: true` 时返回 SSE |
 
+完整的协议契约、SSE 事件语法、工具调用与 reasoning 写法、排障表，见 [ADAPTER.md](ADAPTER.md)。写完后先跑一致性自检：
+
+```powershell
+node packages/dsh-model-gateway/scripts/conformance.mjs http://127.0.0.1:8099
+```
+
+它会检查 DSH 真正依赖的那几项（SSE 头、`[DONE]`、`finish_reason`、usage、非流式回退、错误信封），不需要先装 DSH。
+
 然后在 `cordis.patch.yml` 里增加一条配置（不要直接改 profile 的 `cordis.patch.yml`；把它放进自己的 bundle，或作为更高层 patch）：
 
 ```yaml
@@ -151,6 +161,34 @@ gateway_selftest({ "prompt": "Reply with exactly: gateway ok" })
 - `health.type` 可为 `http`、`tcp`、`none`。不配置时：有端口用 `tcp`，否则用 `http` 检查 `baseURL`。
 - `restart.maxRestarts` 是滑动窗口内的重启预算；预算耗尽会进入 `failed`，可通过 `gateway_control` 手动恢复。
 - `autoStart: false` 时插件不主动启动；首次模型请求会通过 `startOnRequest`（默认 true）启动。
+
+## 流式支持
+
+DSH 只走流式（`stream: true`）。适配器把 OpenAI SSE 翻译成完整的 DSH `StreamChunk` 语法：
+
+| OpenAI SSE | DSH chunk |
+|---|---|
+| 首次出现 reasoning 字段 | `block-start`（`blockType: reasoning`） |
+| `delta.reasoning_content` 等 | `reasoning-delta` |
+| 首次出现 `delta.content` | `block-start`（`blockType: text`） |
+| `delta.content` | `text-delta` |
+| 首次出现工具槽位 | `block-start`（`blockType: tool-call`） |
+| `delta.tool_calls[].function.arguments` | `tool-call-delta`（原始 JSON 字符串增量） |
+| 流结束 | 每块一条 `block-end`（携带拼好的完整块） |
+| `payload.usage` | `usage`（在 `finish` 之前） |
+| `finish_reason` 或 `[DONE]` | `finish`（`stop` / `tool-calls` / `max-tokens`） |
+
+已覆盖的流式行为：
+
+- 文本、reasoning、工具调用三类块可以交错；工具调用按 `index` 分槽增量拼接；
+- `[DONE]` 或 `finish_reason` 至少有一个，否则按 `TRANSPORT` 判为截断，不会假装成功；
+- 非 JSON 的 `data:` 帧报 `INVALID_RESPONSE`，不会被静默丢弃；
+- `usage` 允许出现在 finish chunk 之后（部分网关如此），适配器会继续读到 `[DONE]` 再收尾；
+- 显式 `length` / `max_tokens` 优先于工具增量，避免把半截参数交给工具执行器；
+- 应答若被网关降级成 `application/json`，适配器会把它展开成同样的 chunk 序列；
+- 客户端中断经 `AbortSignal` 传到 fetch；连接超时与流空闲超时分别判定，空闲默认 300 秒。
+
+逐字段契约与错误码见 [ADAPTER.md](ADAPTER.md)。
 
 ## 配置参考
 
@@ -329,7 +367,7 @@ packages/dsh-model-gateway/logs/opencode-go.jsonl
 
 本仓库完成时已实际验证：
 
-- `node --test packages/dsh-model-gateway/test/gateway.test.mjs`：15/15 通过（启动/流式、截断流、损坏 SSE、length 工具调用、启动预检、启动期退出/待重启状态、崩溃重启、重启预算耗尽、健康看门狗、禁用重启、健康预算耗尽停止子进程、health path/URL、配置、SSE、脱敏）；
+- `node --test packages/dsh-model-gateway/test/gateway.test.mjs`：16/16 通过（启动/流式块协议、截断流、损坏 SSE、流内错误事件、length 工具调用、启动预检、启动期退出/待重启状态、崩溃重启、重启预算耗尽、健康看门狗、禁用重启、健康预算耗尽停止子进程、health path/URL、配置、SSE、脱敏）；
 - `gateway_status`：`running`、健康、PID、模型路由；
 - `gateway_selftest`：真实 OpenCode Go 流式响应，返回 `gateway ok` / `restart ok` / `autostart ok`；
 - 手动 `taskkill` 网关进程后：插件在约 1 秒内拉起新 PID，`restarts: 1`，随后自测成功；
@@ -338,7 +376,7 @@ packages/dsh-model-gateway/logs/opencode-go.jsonl
 
 ## 已知边界
 
-- 适配器只实现 **OpenAI Chat Completions**。Anthropic Messages、Responses API、Gemini 原生协议等，需要在网关进程里翻译成 Chat Completions；也可以复制 `openai-adapter.js` 扩展。
+- 适配器只实现 **OpenAI Chat Completions**。Anthropic Messages、Responses API、Gemini 原生协议等，需要在网关进程里翻译成 Chat Completions；确实要直接实现新协议时，按 [ADAPTER.md](ADAPTER.md) 第 10 节复制 `openai-adapter.js` 扩展。
 - 不支持多路复用/负载均衡；一个网关 id 对应一个进程和一个 endpoint。
 - `apiKeyEnv` 读取的是 DSH Host 进程环境，不读取 OpenCode/其他客户端的 auth.json。
 - 没有 Web 设置页；配置入口是 Cordis patch / bundle。工具和日志是给 Agent 和运维用的。
