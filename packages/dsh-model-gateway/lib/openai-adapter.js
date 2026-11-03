@@ -27,6 +27,20 @@ function isAbortError(error) {
   return error?.name === 'AbortError' || error?.code === 'ABORT_ERR'
 }
 
+/** Settle like `promise`, but reject as soon as `signal` aborts. */
+function abortable(promise, signal) {
+  if (signal === undefined) return promise
+  if (signal.aborted) return Promise.reject(signal.reason ?? new Error('aborted'))
+  return new Promise((resolve, reject) => {
+    const onAbort = () => reject(signal.reason ?? new Error('aborted'))
+    signal.addEventListener('abort', onAbort, { once: true })
+    promise.then(
+      (value) => { signal.removeEventListener('abort', onAbort); resolve(value) },
+      (error) => { signal.removeEventListener('abort', onAbort); reject(error) },
+    )
+  })
+}
+
 function textOfContent(content) {
   if (typeof content === 'string') return content
   if (!Array.isArray(content)) return ''
@@ -56,21 +70,48 @@ function joinURL(baseURL, suffix) {
 
 function normalizeUsage(raw) {
   if (raw === null || typeof raw !== 'object') return undefined
-  const inputTokens = Number.isFinite(raw.prompt_tokens) ? raw.prompt_tokens
-    : Number.isFinite(raw.input_tokens) ? raw.input_tokens : 0
-  const outputTokens = Number.isFinite(raw.completion_tokens) ? raw.completion_tokens
-    : Number.isFinite(raw.output_tokens) ? raw.output_tokens : 0
-  const totalTokens = Number.isFinite(raw.total_tokens) ? raw.total_tokens : inputTokens + outputTokens
-  if (inputTokens === 0 && outputTokens === 0 && totalTokens === 0) return undefined
   const details = raw.prompt_tokens_details ?? {}
   const completionDetails = raw.completion_tokens_details ?? {}
+  const cacheReadTokens = Number.isFinite(details.cached_tokens) && details.cached_tokens >= 0
+    ? details.cached_tokens
+    : undefined
+  const aggregatePrompt = Number.isFinite(raw.prompt_tokens) ? raw.prompt_tokens
+    : Number.isFinite(raw.input_tokens) ? raw.input_tokens : undefined
+  const outputTokens = Number.isFinite(raw.completion_tokens) ? raw.completion_tokens
+    : Number.isFinite(raw.output_tokens) ? raw.output_tokens : undefined
+  // DSH token counts are disjoint: inputTokens is uncached input only, while
+  // OpenAI's prompt_tokens folds cache hits into the aggregate. Subtract them
+  // out so that input + cacheRead + output equals the billed total.
+  const inputTokens = aggregatePrompt === undefined ? undefined
+    : cacheReadTokens === undefined ? aggregatePrompt : Math.max(0, aggregatePrompt - cacheReadTokens)
+  const totalTokens = Number.isFinite(raw.total_tokens) ? raw.total_tokens
+    : inputTokens !== undefined && outputTokens !== undefined
+      ? inputTokens + outputTokens + (cacheReadTokens ?? 0)
+      : undefined
+  if (inputTokens === undefined && outputTokens === undefined && totalTokens === undefined && cacheReadTokens === undefined) {
+    return undefined
+  }
   return {
-    inputTokens,
-    outputTokens,
-    totalTokens,
-    ...(Number.isFinite(details.cached_tokens) ? { cacheReadTokens: details.cached_tokens } : {}),
+    ...(inputTokens === undefined ? {} : { inputTokens }),
+    ...(outputTokens === undefined ? {} : { outputTokens }),
+    ...(totalTokens === undefined ? {} : { totalTokens }),
+    ...(cacheReadTokens === undefined ? {} : { cacheReadTokens }),
     ...(Number.isFinite(completionDetails.reasoning_tokens) ? { reasoningTokens: completionDetails.reasoning_tokens } : {}),
   }
+}
+
+/** Merge a sparse usage update over what the stream already reported. */
+function mergeUsage(previous, next) {
+  if (next === undefined) return previous
+  if (previous === undefined) return next
+  const merged = { ...previous, ...next }
+  if (merged.inputTokens !== undefined && merged.outputTokens !== undefined) {
+    merged.totalTokens = next.totalTokens
+      ?? merged.inputTokens + merged.outputTokens + (merged.cacheReadTokens ?? 0)
+  } else if (next.totalTokens === undefined) {
+    delete merged.totalTokens
+  }
+  return merged
 }
 
 function finishReasonFrom(wire, sawToolCall) {
@@ -83,14 +124,24 @@ function finishReasonFrom(wire, sawToolCall) {
     case 'tool_calls':
     case 'function_call':
       return { kind: 'tool-calls' }
+    case 'stop':
+    case 'end_turn':
     case 'content_filter':
       return { kind: 'stop' }
     default:
       break
   }
-  // No explicit truncation/stop signal: tool deltas mean the provider intends
-  // a tool-call turn, otherwise this is a normal stop.
+  // No explicit stop signal: tool deltas mean the provider intends a tool-call
+  // turn, otherwise this is a normal stop.
   return sawToolCall ? { kind: 'tool-calls' } : { kind: 'stop' }
+}
+
+function retryAfterMs(value) {
+  if (value === null || value === undefined) return undefined
+  if (/^\d+(\.\d+)?$/.test(value)) return Math.max(1, Math.round(Number(value) * 1_000))
+  const at = Date.parse(value)
+  if (!Number.isFinite(at)) return undefined
+  return Math.max(1, at - Date.now())
 }
 
 function mapHTTPError(status, body, headers) {
@@ -107,9 +158,7 @@ function mapHTTPError(status, body, headers) {
           : status === 400 || status === 422 ? 'INVALID_REQUEST'
             : 'PROVIDER_ERROR'
   const retryAfter = headers?.get?.('retry-after')
-  const providerRetryAfterMs = retryAfter !== null && retryAfter !== undefined && /^\d+(\.\d+)?$/.test(retryAfter)
-    ? Math.max(1, Math.round(Number(retryAfter) * 1000))
-    : undefined
+  const providerRetryAfterMs = retryAfterMs(retryAfter)
   return gatewayError(
     `gateway HTTP ${status}: ${String(message || 'request failed').trim()}`,
     code,
@@ -121,9 +170,10 @@ function mapHTTPError(status, body, headers) {
   )
 }
 
-async function readBodyLimited(response, maxBytes = 8_192) {
+async function readBodyLimited(response, signal, maxBytes = 8_192) {
+  let reader
   try {
-    const reader = response.body?.getReader()
+    reader = response.body?.getReader()
     if (reader === undefined) return ''
     const decoder = new TextDecoder()
     let text = ''
@@ -136,22 +186,29 @@ async function readBodyLimited(response, maxBytes = 8_192) {
     }
     try { await reader.cancel() } catch {}
     return text.slice(0, maxBytes)
-  } catch {
+  } catch (error) {
+    // An abort or timeout while draining the error body must keep its own
+    // classification instead of being reported as the HTTP status.
+    if (signal?.aborted) throw error
+    try { await reader?.cancel() } catch {}
     return ''
   }
 }
 
 /**
  * Parse a `text/event-stream` body into data payload strings.
- * Tolerant of CRLF, comments, multiple data lines and keepalives.
+ * Tolerant of LF/CRLF/CR line endings, comments, multiple data lines and
+ * keepalives. `onActivity` fires on every received chunk so the caller can
+ * measure network inactivity rather than completed-event cadence.
  */
-export async function* sseData(body, signal) {
+export async function* sseData(body, signal, onActivity) {
   if (body === undefined || body === null) return
   const reader = body.getReader()
   const decoder = new TextDecoder()
   let buffer = ''
   let dataLines = []
   let eventName
+  let pendingCR = false
 
   const flush = () => {
     if (dataLines.length === 0) {
@@ -165,13 +222,29 @@ export async function* sseData(body, signal) {
     return { data, event: name }
   }
 
+  const normalize = (input) => {
+    let text = input
+    if (pendingCR) {
+      // The held CR terminated a line whether or not the next byte is its LF.
+      pendingCR = false
+      if (text.startsWith('\n')) text = text.slice(1)
+      text = `\n${text}`
+    }
+    // Hold a trailing CR: the next chunk may start with the LF of a CRLF pair.
+    if (text.endsWith('\r')) {
+      text = text.slice(0, -1)
+      pendingCR = true
+    }
+    return text.replace(/\r\n/g, '\n').replace(/\r/g, '\n')
+  }
+
   try {
     while (true) {
       if (signal?.aborted) throw signal.reason ?? new Error('aborted')
       const { done, value } = await reader.read()
       if (done) break
-      buffer += decoder.decode(value, { stream: true })
-      buffer = buffer.replace(/\r\n/g, '\n')
+      onActivity?.()
+      buffer += normalize(decoder.decode(value, { stream: true }))
       let newline
       while ((newline = buffer.indexOf('\n')) >= 0) {
         const line = buffer.slice(0, newline)
@@ -191,10 +264,21 @@ export async function* sseData(body, signal) {
         }
       }
     }
-    buffer += decoder.decode()
+    buffer += normalize(decoder.decode())
     if (buffer.length > 0) {
-      const line = buffer.replace(/\r$/, '')
-      if (line.startsWith('data:')) dataLines.push(line.slice(5).replace(/^ /, ''))
+      for (const line of buffer.split('\n')) {
+        if (line === '') {
+          const event = flush()
+          if (event !== undefined) yield event
+          continue
+        }
+        if (line.startsWith(':')) continue
+        if (line.startsWith('event:')) {
+          eventName = line.slice(6).trim()
+          continue
+        }
+        if (line.startsWith('data:')) dataLines.push(line.slice(5).replace(/^ /, ''))
+      }
     }
     const event = flush()
     if (event !== undefined) yield event
@@ -464,7 +548,7 @@ export function createOpenAIAdapter({ config, supervisor, ctx, log }) {
     }
     if (payload?.usage !== undefined) {
       const usage = normalizeUsage(payload.usage)
-      if (usage !== undefined) state.usage = usage
+      if (usage !== undefined) state.usage = mergeUsage(state.usage, usage)
     }
     const choice = payload?.choices?.[0]
     if (choice === undefined) return chunks
@@ -530,7 +614,14 @@ export function createOpenAIAdapter({ config, supervisor, ctx, log }) {
         argumentsDelta,
       })
     }
-    if (typeof choice.finish_reason === 'string') state.finishReason = choice.finish_reason
+    if (typeof choice.finish_reason === 'string') {
+      // Truncation is sticky: a later frame claiming "stop" must not restore a
+      // possibly incomplete tool call into the executable set.
+      const current = state.finishReason
+      const truncated = current === 'length' || current === 'max_tokens'
+      const incomingTruncated = choice.finish_reason === 'length' || choice.finish_reason === 'max_tokens'
+      if (incomingTruncated || !truncated) state.finishReason = choice.finish_reason
+    }
     return chunks
   }
 
@@ -539,8 +630,13 @@ export function createOpenAIAdapter({ config, supervisor, ctx, log }) {
     if (signal?.aborted) throw signal.reason ?? new Error('aborted')
     if (supervisor !== undefined) {
       try {
-        await supervisor.ensureRunning()
+        // Startup can take tens of seconds; the caller's cancellation must not
+        // be held hostage by it. Racing does not cancel startup for anyone else.
+        await abortable(supervisor.ensureRunning(), signal)
       } catch (error) {
+        if (signal?.aborted) {
+          throw gatewayError('gateway request aborted while the gateway was starting', 'ABORTED', { cause: error })
+        }
         throw gatewayError(
           `gateway "${config.id}" is unavailable: ${String(error?.message ?? error)}`,
           error?.code ?? 'GATEWAY_DOWN',
@@ -548,6 +644,7 @@ export function createOpenAIAdapter({ config, supervisor, ctx, log }) {
         )
       }
     }
+    if (signal?.aborted) throw gatewayError('gateway request aborted', 'ABORTED')
     const started = Date.now()
     const body = buildBody(options)
     body.messages = await buildMessages(options, signal)
@@ -583,13 +680,43 @@ export function createOpenAIAdapter({ config, supervisor, ctx, log }) {
       controller.abort(new Error(`connect timeout after ${provider.connectTimeoutMs}ms`))
     }, provider.connectTimeoutMs)
     let idleTimer
+    const clearIdle = () => {
+      if (idleTimer !== undefined) {
+        clearTimeout(idleTimer)
+        idleTimer = undefined
+      }
+    }
     const resetIdle = () => {
-      if (idleTimer !== undefined) clearTimeout(idleTimer)
+      clearIdle()
       idleTimer = setTimeout(() => {
         abortedBy = 'idle-timeout'
         controller.abort(new Error(`stream idle timeout after ${provider.streamIdleTimeoutMs}ms`))
       }, provider.streamIdleTimeoutMs)
       idleTimer.unref?.()
+    }
+    // Idle means "no bytes from the gateway", not "no completed event": a
+    // keepalive comment or a slowly delivered frame is real network progress.
+    // Disarm while the consumer holds the iterator so consumer latency is not
+    // charged to the provider.
+    const guarded = function* guarded(chunks) {
+      for (const chunk of chunks) {
+        clearIdle()
+        yield chunk
+        resetIdle()
+      }
+    }
+    const readAll = async (source) => {
+      const reader = source.body?.getReader()
+      if (reader === undefined) return ''
+      const decoder = new TextDecoder()
+      let text = ''
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        resetIdle()
+        text += decoder.decode(value, { stream: true })
+      }
+      return text + decoder.decode()
     }
 
     let response
@@ -617,9 +744,18 @@ export function createOpenAIAdapter({ config, supervisor, ctx, log }) {
     clearTimeout(connectTimer)
     resetIdle()
 
+    let state
+    let usageSent = false
+    const usageChunk = () => {
+      if (usageSent || state?.usage === undefined) return []
+      if (state.usage.inputTokens === undefined || state.usage.outputTokens === undefined) return []
+      usageSent = true
+      return [{ type: 'usage', usage: state.usage }]
+    }
+
     try {
       if (!response.ok) {
-        const text = await readBodyLimited(response)
+        const text = await readBodyLimited(response, controller.signal)
         const error = mapHTTPError(response.status, text, response.headers)
         log.trace('http-error', {
           status: response.status,
@@ -638,12 +774,12 @@ export function createOpenAIAdapter({ config, supervisor, ctx, log }) {
 
       const contentType = (response.headers.get('content-type') ?? '').toLowerCase()
       if (contentType.includes('application/json')) {
-        const text = await response.text()
+        const text = await readAll(response)
         let payload
         try { payload = JSON.parse(text) } catch {
           throw gatewayError(`gateway returned invalid JSON: ${text.slice(0, 300)}`, 'INVALID_RESPONSE')
         }
-        const state = {
+        state = {
           nextBlock: 0,
           textIndex: -1,
           reasoningIndex: -1,
@@ -654,16 +790,17 @@ export function createOpenAIAdapter({ config, supervisor, ctx, log }) {
           usage: undefined,
           finishReason: undefined,
         }
-        for (const chunk of emitDelta(payload, state)) yield chunk
+        yield* guarded(emitDelta(payload, state))
         if (!state.sawContent) throw gatewayError('gateway returned an empty response', 'EMPTY_RESPONSE')
-        for (const block of closeBlocks(state)) yield block
-        if (state.usage !== undefined) yield { type: 'usage', usage: state.usage }
-        yield { type: 'finish', reason: finishReasonFrom(state.finishReason, state.sawToolCall) }
-        log.trace('finish', { reason: finishReasonFrom(state.finishReason, state.sawToolCall), usage: state.usage, elapsedMs: Date.now() - started })
+        yield* guarded(closeBlocks(state))
+        yield* guarded(usageChunk())
+        const jsonReason = finishReasonFrom(state.finishReason, state.sawToolCall)
+        yield* guarded([{ type: 'finish', reason: jsonReason }])
+        log.trace('finish', { reason: jsonReason, usage: state.usage, elapsedMs: Date.now() - started })
         return
       }
 
-      const state = {
+      state = {
         nextBlock: 0,
         textIndex: -1,
         reasoningIndex: -1,
@@ -675,8 +812,7 @@ export function createOpenAIAdapter({ config, supervisor, ctx, log }) {
         finishReason: undefined,
         done: false,
       }
-      for await (const event of sseData(response.body, controller.signal)) {
-        resetIdle()
+      for await (const event of sseData(response.body, controller.signal, resetIdle)) {
         if (event.data === '[DONE]') {
           state.done = true
           break
@@ -690,22 +826,25 @@ export function createOpenAIAdapter({ config, supervisor, ctx, log }) {
           throw gatewayError('gateway sent a non-JSON SSE data event', 'INVALID_RESPONSE')
         }
         if (trace === 'verbose') log.trace('sse', payload)
-        for (const chunk of emitDelta(payload, state)) yield chunk
-        if (state.finishReason !== undefined && state.usage !== undefined) {
-          // Keep consuming until [DONE]: some gateways send the usage chunk
-          // after the finish_reason chunk.
-        }
+        yield* guarded(emitDelta(payload, state))
       }
       if (!state.done && state.finishReason === undefined) {
         throw gatewayError('gateway stream ended before a completion marker ([DONE] or finish_reason)', 'TRANSPORT')
       }
       if (!state.sawContent) throw gatewayError('gateway stream produced no content', 'EMPTY_RESPONSE')
-      for (const block of closeBlocks(state)) yield block
-      if (state.usage !== undefined) yield { type: 'usage', usage: state.usage }
+      yield* guarded(closeBlocks(state))
+      yield* guarded(usageChunk())
       const reason = finishReasonFrom(state.finishReason, state.sawToolCall)
-      yield { type: 'finish', reason }
+      yield* guarded([{ type: 'finish', reason }])
       log.trace('finish', { reason, usage: state.usage, elapsedMs: Date.now() - started, sawToolCall: state.sawToolCall })
     } catch (error) {
+      // Usage already reported by the gateway is real even when the turn fails;
+      // emit it once before the terminal failure so accounting is not lost.
+      if (!usageSent && state?.usage !== undefined
+        && state.usage.inputTokens !== undefined && state.usage.outputTokens !== undefined) {
+        usageSent = true
+        yield { type: 'usage', usage: state.usage }
+      }
       if (isAbortError(error) || controller.signal.aborted) {
         const timedOut = abortedBy === 'timeout' || abortedBy === 'idle-timeout'
         if (error?.failure !== undefined) throw error

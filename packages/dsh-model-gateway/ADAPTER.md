@@ -80,12 +80,12 @@ DSH 发来的是标准 Chat Completions 请求体。你可以先用 `curl` 观�
 
 要点：
 
-- **`stream` 恒为 `true`**：DSH 只走流式。你的网关仍然应该实现非流式分支（第 5 节），因为自检脚本和人工 `curl` 会用到。
+- **`stream` 默认为 `true`**：DSH 只走流式。注意 `provider.extraBody` 在最后展开，可以覆盖 `stream`/`stream_options`；如果你这么做，要自己确保网关行为一致。你的网关仍然应该实现非流式分支（第 5 节），因为自检脚本和人工 `curl` 会用到。
 - **`messages` 里的 `content` 可能是字符串，也可能是数组**（多模态）：`[{"type":"text","text":"..."},{"type":"image_url","image_url":{"url":"data:image/png;base64,..."}}]`。
 - **`tools` 只在有工具时出现**；`tool_choice` 出现即表示可以调用。
 - **`reasoning_effort` 只在模型声明了 `reasoningEfforts` 且调用方选了时才出现**，值已被映射成你要的字符串。
 - **`max_tokens` vs `max_completion_tokens`**：由 `provider.maxTokensField` 决定，默认 `max_tokens`。上游只认另一个时改这个配置，不要改代码。
-- **`system` 消息恒为第一条**，且只有一条（DSH 会把多个 system/developer 片段合并）。
+- **`system` 消息最多一条且在首位**：DSH 会把多个 system/developer 片段合并成一条；没有任何非空 system 内容时，请求里不会有 system 消息。
 
 ---
 
@@ -102,7 +102,7 @@ Cache-Control: no-cache
 Connection: keep-alive
 ```
 
-`Content-Type` 必须包含 `text/event-stream`。插件靠它判断走 SSE 还是走 JSON 回退；写错会直接进 JSON 分支然后报 `INVALID_RESPONSE`。
+`Content-Type` 应当包含 `text/event-stream`。适配器只在包含 `application/json` 时才走 JSON 回退，其余取值（包括缺失、`text/plain`）都按 SSE 解析；所以写错类型不会“自动降级”，而是把 JSON 当 SSE 读，通常以 `TRANSPORT` 结束。
 
 ### 3.2 一个完整的最小流
 
@@ -128,7 +128,7 @@ data: [DONE]
 | 规则 | 原因 |
 |---|---|
 | 每行以 `data: ` 开头，事件以**空行**结束 | SSE 语法；空行才是事件边界 |
-| 允许 `\r\n`，允许 `: keepalive` 注释行，允许一个事件多行 `data:` | 解析器已兼容；但不要依赖它 |
+| 允许 `\r\n`、孤立 `\r`，允许 `: keepalive` 注释行，允许一个事件多行 `data:` | 解析器已兼容；注释保活会重置空闲超时计时 |
 | 最后一个事件必须是 `data: [DONE]` | 缺 `[DONE]` 且无 `finish_reason` 会被判为 `TRANSPORT`（截断） |
 | `usage` 事件没有 `choices`，或 `choices: []` | OpenAI 的 usage-only chunk 形态 |
 | `delta.content` 可为空字符串、可省略 | 空 delta 被忽略，不会产生空块 |
@@ -136,13 +136,15 @@ data: [DONE]
 
 ### 3.3 结束语义
 
-- `finish_reason: "stop"` → DSH 正常结束。
-- `finish_reason: "tool_calls"`（或 `"function_call"`）→ DSH 执行工具，然后带着工具结果再请求一次。
-- `finish_reason: "length"` / `"max_tokens"` → DSH 标记 `max-tokens`；**此时不完整的工具调用不会被执行**（这是刻意的保护）。
-- `finish_reason: "content_filter"` → 按 `stop` 处理。
-- 没有 `finish_reason` 也没有 `[DONE]` → `TRANSPORT` 错误。不要用“连接关闭”当结束信号。
+`finish_reason` 只是**记录终态**；适配器要读到 `[DONE]` 或连接结束才收尾，因为有些网关把 usage 放在 `finish_reason` 之后。所以：可以没有 `[DONE]`（此时靠 `finish_reason` + EOF 结束），也可以没有 `finish_reason`（此时靠 `[DONE]` 结束）；两者都没有才是 `TRANSPORT`。不要用“连接关闭”当唯一的成功信号。
 
-> `[DONE]` 之后**不要再发任何事件**。DSH 在 `[DONE]` 处停止读取，但多发的数据可能污染连接复用。
+- `finish_reason: "stop"` → 正常结束（即使之前出现过工具增量，也报 `stop`）。
+- `finish_reason: "tool_calls"`（或 `"function_call"`）→ DSH 执行工具，然后带着工具结果再请求一次。
+- `finish_reason: "length"` / `"max_tokens"` → DSH 标记 `max-tokens`；**此时不完整的工具调用不会被执行**。该判定是粘滞的：后续帧再报 `stop` 也不会把它降级。
+- `finish_reason: "content_filter"` → 按 `stop` 处理。
+- 没有 `finish_reason` 也没有 `[DONE]` → `TRANSPORT` 错误。
+
+> `[DONE]` 之后**不要再发任何事件**。适配器读到 `[DONE]` 就取消响应体读取，后面的数据会被忽略（不会“污染连接复用”，但也不会被处理）。
 
 ### 3.4 错误
 
@@ -170,7 +172,7 @@ data: {"error":{"message":"upstream disconnected","code":"upstream"}}
 
 ```
 
-不要用 `data: [DONE]` 假装成功——那会让 DSH 收到一条空回复并报 `EMPTY_RESPONSE`，掩盖真实原因。
+不要用 `data: [DONE]` 假装成功。如果此前已经有内容，DSH 会把它当成正常完成，真实错误被静默吞掉；如果此前没有任何内容，则报 `EMPTY_RESPONSE`——两种都不是你想要的。
 
 ### 3.5 工具调用流（最容易写错）
 
@@ -224,8 +226,8 @@ reasoning 和 text **可以交替**：插件会各自开新块。先 reasoning �
 | 首次出现某工具槽位 | `{type:'block-start', index, blockType:'tool-call'}` |
 | `delta.tool_calls[n].function.arguments` | `{type:'tool-call-delta', index, id, name?, argumentsDelta}` |
 | 流结束 | 每个块一条 `{type:'block-end', index, block}`（携带拼好的完整块） |
-| `payload.usage` | `{type:'usage', usage:{inputTokens,outputTokens,totalTokens,cacheReadTokens?,reasoningTokens?}}` |
-| `finish_reason` / `[DONE]` | `{type:'finish', reason:{kind:'stop'\|'tool-calls'\|'max-tokens'}}` |
+| `payload.usage` | `{type:'usage', usage:{inputTokens,outputTokens,totalTokens,cacheReadTokens?,reasoningTokens?}}`，其中 `inputTokens` 已减去缓存命中（DSH 的三个计数互斥） |
+| `finish_reason` 或 `[DONE]` | `{type:'finish', reason:{kind:'stop'\|'tool-calls'\|'max-tokens'}}`；实际收尾要等 `[DONE]` 或 EOF |
 
 `block-end` 是**权威最终块**：UI 用它替换累积的草稿，replay 用它复原消息。所以你不需要额外发“完整内容”，插件会用累积的 delta 生成它。
 
@@ -248,7 +250,7 @@ reasoning 和 text **可以交替**：插件会各自开新块。先 reasoning �
 }
 ```
 
-插件会把它展开成同样的 chunk 序列，所以 DSH 侧行为一致。实现非流式分支的收益：`curl` 调试简单、一致性脚本能覆盖、有些客户端只支持非流式。
+插件会把它展开成同样的 chunk 序列，所以 DSH 侧行为一致。差异只有终止校验：JSON 分支不要求 `finish_reason`（有内容即可成功），SSE 分支要求 `[DONE]` 或 `finish_reason` 至少一个。实现非流式分支的收益：`curl` 调试简单、一致性脚本能覆盖、有些客户端只支持非流式。
 
 ---
 
@@ -363,13 +365,13 @@ gateway_status()
 gateway_selftest({ "id": "my-model", "prompt": "Reply with exactly: my gateway ok" })
 ```
 
-`gateway_selftest` 走的是真实 DSH 链路（`ctx.llm.stream()` → adapter → 你的网关 → SSE → chunk），它成功就说明第 2、3 节的契约全部成立。
+`gateway_selftest` 走的是真实 DSH 链路（`ctx.llm.stream()` → adapter → 你的网关 → SSE → chunk）。它成功只证明**这次文本流**的路径成立；工具调用、分片帧、取消、错误与计费仍需一致性脚本和你自己的用例覆盖。
 
 ---
 
 ## 9. 排障：按层定位
 
-先看 `gateway_logs`（`stream: "trace"`）。每条请求都会留下 `request` / `response` / `finish` 三类 trace。
+先看 `gateway_logs`（`stream: "trace"`）。成功请求会留下 `request` / `response` / `finish`；失败路径可能只有部分条目，`trace: off` 时连这些也不会写。
 
 | 现象 | 最可能的原因 | 查什么 |
 |---|---|---|
@@ -378,7 +380,7 @@ gateway_selftest({ "id": "my-model", "prompt": "Reply with exactly: my gateway o
 | `SCRIPT_MISSING` / `CWD_MISSING` | 路径错 | `script` 相对 `cwd`；`cwd` 用绝对路径 |
 | `TRANSPORT` + `completion marker` | 没有 `[DONE]` 也没有 `finish_reason` | 网关的结束分支；是否 flush 了最后一行 |
 | `INVALID_RESPONSE` + `non-JSON SSE` | 把日志/心跳当 SSE 发了 | 只发 `data: {json}`，不要发裸文本 |
-| `EMPTY_RESPONSE` | 只发了 reasoning，没有 content | 确认 `delta.content` 非空；纯思考模型要同时给 content |
+| `EMPTY_RESPONSE` | 整个流没有任何可识别内容 | reasoning 也算内容（纯思考模型会成功）；真正空流才会报这个错误 |
 | `AUTH` | key 没传到网关 | `apiKeyEnv` 读的是 **DSH Host 进程**环境；桌面启动的 DSH 不继承终端变量 |
 | 流式变成“一次性出现” | 网关做了缓冲（`Content-Length`、压缩、框架整包发送） | 关闭响应压缩；每帧显式 flush；禁用反向代理缓冲 |
 | 工具调用参数 JSON 解析失败 | `arguments` 拼接不是合法 JSON | 逐段拼接后必须是完整 JSON；别在片段里加空格 |
@@ -417,13 +419,25 @@ curl.exe -N -X POST http://127.0.0.1:8099/v1/chat/completions `
 | `providerRetryPolicy()` | 返回 `undefined` 表示用默认重试策略 |
 | `imageRequestPricing()` / `imageRequestTarget()` | 仅图片请求需要 |
 
-流式实现的三条硬性要求：
+流式实现的三条约定（本适配器与两个官方适配器都遵守；DSH 的 assembler 对 delta-only 和失败时未闭合的块是容忍的，但这三条能保证 UI、replay 与工具历史一致）：
 
 1. 每个 delta 之前必须先发对应的 `block-start`（index 从 0 递增，同类型块可复用 index）。
 2. 结束前为每个打开的块发 `block-end`，且 `block.type` 与 `block-start` 的 `blockType` 一致。
 3. `usage` 在 `finish` 之前，`finish` 之后什么都不能再发。
 
 然后把它注册进插件（`index.js` 里 `ctx.llm.registerAdapter` 的位置），并在配置里加一个 `protocol: custom` 之类的分支。**这是唯一需要改框架代码的场景**；能走 OpenAI 兼容面就不要走这条路。
+
+### 已知边界
+
+这些行为是有意为之或已声明，不是待修 bug：
+
+- 只读 `choices[0]`：请求 `n > 1` 时其余补全被丢弃（DSH 是单补全模型）。
+- 工具名的语义是“当前完整名”：网关重复发同一个名字不会出错；但把名字拆成多帧、每帧只发片段时，后到的片段会覆盖先前的（与 DSH 官方适配器一致）。请在第一帧发完整名字。
+- 流式工具调用要求带 `index`；缺失时按数组位置兜底，多个调用分多帧到达时可能被合并。这不是标准 OpenAI 行为。
+- 工具参数按原始字符串透传，不校验 JSON 合法性；非法参数会在工具执行层报错。
+- 不提供 `replayState`，因此丢失上游原生响应元数据（内容与工具历史仍可正确组装）。
+- SSE 帧没有大小上限；单个超长行会一直缓冲到换行或 EOF。
+- 单个流没有总时长上限：只要还有字节到达，就会继续读。
 
 ---
 
@@ -435,9 +449,10 @@ curl.exe -N -X POST http://127.0.0.1:8099/v1/chat/completions `
 - [ ] `POST /v1/chat/completions` 在 `stream: true` 时返回 `text/event-stream`
 - [ ] 每帧 `data: ` + 空行；最后有 `data: [DONE]`
 - [ ] 有 `finish_reason`；`tool_calls` 场景发 `tool_calls`
-- [ ] usage 事件在 finish 之前，字段是 `prompt_tokens` / `completion_tokens`
+- [ ] usage 事件在 finish 之前，字段是 `prompt_tokens` / `completion_tokens`（缓存命中放 `prompt_tokens_details.cached_tokens`）
 - [ ] 非 2xx 有 `{"error":{"message":...}}`
 - [ ] 工具调用的 `arguments` 是逐段拼接的字符串，拼完是合法 JSON
+- [ ] 工具调用每帧都带 `index`，名字在首帧给全
 - [ ] reasoning 字段名与 `provider.reasoningFields` 一致
 
 **流式**

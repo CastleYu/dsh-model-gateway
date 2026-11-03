@@ -43,7 +43,7 @@ The demo gateway runs in `auto` mode: set `OPENCODE_GO_API_KEY` in the DSH launc
 
 ## Verification
 
-- `node --test packages/dsh-model-gateway/test/gateway.test.mjs` — 16/16 passing.
+- `node --test packages/dsh-model-gateway/test/gateway.test.mjs` — 27/27 passing.
 - `node packages/dsh-model-gateway/scripts/conformance.mjs <url>` — protocol conformance for a running gateway (both bundled examples pass).
 - Live DSH validation: autostart, health check, crash restart, `startOnRequest`, real OpenCode Go streaming (`deepseek-v4.1-flash`, `glm-5.3-flash`), and internal log inspection.
 

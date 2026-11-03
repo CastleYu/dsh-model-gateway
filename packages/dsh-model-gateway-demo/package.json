@@ -1,6 +1,6 @@
 {
   "name": "@local/dsh-model-gateway-demo",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "private": true,
   "type": "module",
   "description": "Worked example bundle: supervise the bundled OpenCode Go gateway and expose it as a DSH model route.",

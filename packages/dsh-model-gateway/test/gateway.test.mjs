@@ -51,7 +51,44 @@ async function waitFor(check, { timeout = 15_000, interval = 100, label = 'condi
   throw new Error(`timed out waiting for ${label}; last=${last instanceof Error ? last.message : JSON.stringify(last)}`)
 }
 
-function rawConfig(port, { failFile = '', health = {}, restart = {}, requestPath = '/chat/completions' } = {}) {
+async function gatewayAdapter(t, { query = '', provider = {}, health = {}, restart = {} } = {}) {
+  const port = await freePort()
+  const config = normalizeConfig(
+    rawConfig(port, { requestPath: `/chat/completions${query}`, provider, health, restart }),
+    { packageDir },
+  ).gateways[0]
+  const supervisor = new GatewaySupervisor({ config, ctx: fakeCtx(), packageDir })
+  t.after(async () => { await supervisor.dispose() })
+  await supervisor.start('test')
+  const adapter = createOpenAIAdapter({ config, supervisor, ctx: fakeCtx(), log: supervisor.logs })
+  return { adapter, supervisor, config }
+}
+
+async function collectStream(adapter, options = {}) {
+  const chunks = []
+  for await (const chunk of adapter.stream({
+    provider: 'gateway-test',
+    model: 'mock-model',
+    messages: [{ role: 'user', content: [{ type: 'text', text: 'hello' }] }],
+    maxTokens: 128,
+    ...options,
+  })) {
+    chunks.push(chunk)
+  }
+  return chunks
+}
+
+function streamOf(parts) {
+  const encoder = new TextEncoder()
+  return new ReadableStream({
+    start(controller) {
+      for (const part of parts) controller.enqueue(encoder.encode(part))
+      controller.close()
+    },
+  })
+}
+
+function rawConfig(port, { failFile = '', health = {}, restart = {}, requestPath = '/chat/completions', provider = {} } = {}) {
   return {
     gateways: {
       test: {
@@ -97,6 +134,7 @@ function rawConfig(port, { failFile = '', health = {}, restart = {}, requestPath
           }],
           trace: 'summary',
           discoverModels: false,
+          ...provider,
         },
       },
     },
@@ -329,6 +367,141 @@ test('in-band error event after HTTP 200 surfaces as PROVIDER_ERROR', async (t) 
     },
     (error) => error.code === 'PROVIDER_ERROR' && /upstream disconnected/.test(error.message),
   )
+})
+
+test('parses CR-only and split-CRLF SSE framing', async () => {
+  const collect = async (parts) => {
+    const out = []
+    for await (const event of sseData(streamOf(parts))) out.push(event.data)
+    return out
+  }
+  assert.deepEqual(await collect(['data: {"a":1}\r\rdata: [DONE]\r\r']), ['{"a":1}', '[DONE]'])
+  // A CRLF pair split across two reads is still one line terminator.
+  assert.deepEqual(
+    await collect(['data: {"a":1}\r', '\n\r\n', 'data: [DONE]\r\n\r\n']),
+    ['{"a":1}', '[DONE]'],
+  )
+  // A lone CR at EOF terminates the final line.
+  assert.deepEqual(await collect(['data: {"a":1}\r']), ['{"a":1}'])
+})
+
+test('cached prompt tokens are reported as disjoint usage', async (t) => {
+  const { adapter } = await gatewayAdapter(t, { query: '?cached_usage=1' })
+  const chunks = await collectStream(adapter)
+  const usage = chunks.find((chunk) => chunk.type === 'usage')
+  assert.deepEqual(usage.usage, {
+    inputTokens: 20,
+    outputTokens: 20,
+    totalTokens: 120,
+    cacheReadTokens: 80,
+  })
+})
+
+test('explicit zero usage is preserved instead of dropped', async (t) => {
+  const { adapter } = await gatewayAdapter(t, { query: '?zero_usage=1' })
+  const chunks = await collectStream(adapter)
+  const usage = chunks.find((chunk) => chunk.type === 'usage')
+  assert.deepEqual(usage.usage, { inputTokens: 0, outputTokens: 0, totalTokens: 0 })
+})
+
+test('a sparse usage update keeps previously reported counters', async (t) => {
+  const { adapter } = await gatewayAdapter(t, { query: '?sparse_usage=1' })
+  const chunks = await collectStream(adapter)
+  const usage = chunks.find((chunk) => chunk.type === 'usage')
+  assert.deepEqual(usage.usage, { inputTokens: 100, outputTokens: 25, totalTokens: 125 })
+})
+
+test('explicit stop stays stop even when tool deltas were seen', async (t) => {
+  const { adapter } = await gatewayAdapter(t, { query: '?stop_with_tool=1' })
+  const chunks = await collectStream(adapter, {
+    tools: [{ name: 'probe', description: 'probe', parameters: { type: 'object', properties: {} } }],
+  })
+  assert.equal(chunks.find((chunk) => chunk.type === 'finish').reason.kind, 'stop')
+})
+
+test('a later stop cannot downgrade an observed truncation', async (t) => {
+  const { adapter } = await gatewayAdapter(t, { query: '?length_then_stop=1' })
+  const chunks = await collectStream(adapter, {
+    tools: [{ name: 'probe', description: 'probe', parameters: { type: 'object', properties: {} } }],
+  })
+  assert.equal(chunks.find((chunk) => chunk.type === 'finish').reason.kind, 'max-tokens')
+})
+
+test('keepalive comments count as network progress for the idle timeout', async (t) => {
+  const { adapter } = await gatewayAdapter(t, {
+    query: '?ping=1',
+    provider: { streamIdleTimeoutMs: 1_000 },
+  })
+  const chunks = await collectStream(adapter)
+  assert.equal(chunks.find((chunk) => chunk.type === 'finish').reason.kind, 'stop')
+})
+
+test('CR-only SSE is accepted end to end', async (t) => {
+  const { adapter } = await gatewayAdapter(t, { query: '?cr=1' })
+  const chunks = await collectStream(adapter)
+  const text = chunks.filter((chunk) => chunk.type === 'text-delta').map((chunk) => chunk.text).join('')
+  assert.equal(text, 'cr body')
+})
+
+test('JSON fallback produces the same chunk shape', async (t) => {
+  const { adapter } = await gatewayAdapter(t, { query: '?json=1' })
+  const chunks = await collectStream(adapter)
+  const text = chunks.filter((chunk) => chunk.type === 'text-delta').map((chunk) => chunk.text).join('')
+  const usage = chunks.find((chunk) => chunk.type === 'usage')
+  assert.equal(text, 'json fallback body')
+  assert.deepEqual(usage.usage, { inputTokens: 9, outputTokens: 3, totalTokens: 12 })
+  assert.equal(chunks.find((chunk) => chunk.type === 'finish').reason.kind, 'stop')
+})
+
+test('usage received before a stream failure is still reported', async (t) => {
+  const { adapter } = await gatewayAdapter(t, { query: '?usage_then_error=1' })
+  const chunks = []
+  await assert.rejects(
+    async () => {
+      for await (const chunk of adapter.stream({
+        provider: 'gateway-test',
+        model: 'mock-model',
+        messages: [{ role: 'user', content: [{ type: 'text', text: 'hello' }] }],
+        maxTokens: 128,
+      })) {
+        chunks.push(chunk)
+      }
+    },
+    (error) => error.code === 'PROVIDER_ERROR' && /upstream died/.test(error.message),
+  )
+  const usage = chunks.find((chunk) => chunk.type === 'usage')
+  assert.deepEqual(usage.usage, { inputTokens: 11, outputTokens: 7, totalTokens: 18 })
+})
+
+test('aborting during gateway startup does not wait for startup to finish', async (t) => {
+  const port = await freePort()
+  const config = normalizeConfig(rawConfig(port), { packageDir }).gateways[0]
+  let release
+  const startup = new Promise((resolve) => { release = resolve })
+  const adapter = createOpenAIAdapter({
+    config,
+    supervisor: { ensureRunning: () => startup },
+    ctx: fakeCtx(),
+    log: { trace() {}, info() {}, warn() {}, error() {} },
+  })
+  t.after(() => release())
+  const controller = new AbortController()
+  const started = Date.now()
+  setTimeout(() => controller.abort(), 30)
+  await assert.rejects(
+    async () => {
+      for await (const _chunk of adapter.stream({
+        provider: 'gateway-test',
+        model: 'mock-model',
+        messages: [{ role: 'user', content: [{ type: 'text', text: 'hello' }] }],
+        signal: controller.signal,
+      })) {
+        // the abort lands while startup is pending
+      }
+    },
+    (error) => error.code === 'ABORTED',
+  )
+  assert.ok(Date.now() - started < 1_000, `abort took ${Date.now() - started}ms`)
 })
 
 test('explicit length finish wins over incomplete tool-call deltas', async (t) => {

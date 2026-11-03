@@ -183,12 +183,14 @@ DSH 只走流式（`stream: true`）。适配器把 OpenAI SSE 翻译成完整�
 - 文本、reasoning、工具调用三类块可以交错；工具调用按 `index` 分槽增量拼接；
 - `[DONE]` 或 `finish_reason` 至少有一个，否则按 `TRANSPORT` 判为截断，不会假装成功；
 - 非 JSON 的 `data:` 帧报 `INVALID_RESPONSE`，不会被静默丢弃；
-- `usage` 允许出现在 finish chunk 之后（部分网关如此），适配器会继续读到 `[DONE]` 再收尾；
-- 显式 `length` / `max_tokens` 优先于工具增量，避免把半截参数交给工具执行器；
+- `usage` 可以出现在上游 `finish_reason` 帧之后（部分网关如此），适配器会继续读到 `[DONE]` 再收尾；适配器自己的 `usage` chunk 始终在 `finish` 之前；
+- 缓存的 prompt token 会从 `inputTokens` 中扣除，作为独立的 `cacheReadTokens` 上报（DSH 计数互斥）；
+- 显式 `length` / `max_tokens` 优先于工具增量，且不会被后续 `stop` 降级，避免把半截参数交给工具执行器；
 - 应答若被网关降级成 `application/json`，适配器会把它展开成同样的 chunk 序列；
-- 客户端中断经 `AbortSignal` 传到 fetch；连接超时与流空闲超时分别判定，空闲默认 300 秒。
+- 空闲超时按“网络无字节到达”计算：注释保活、慢速大帧、JSON 逐块到达都算进展，消费端处理时间不计入；
+- 客户端中断经 `AbortSignal` 传到 fetch，也能打断“等待网关启动”；连接超时与流空闲超时分别判定，空闲默认 300 秒。
 
-逐字段契约与错误码见 [ADAPTER.md](ADAPTER.md)。
+逐字段契约、已知边界与错误码见 [ADAPTER.md](ADAPTER.md)。
 
 ## 配置参考
 
@@ -367,7 +369,7 @@ packages/dsh-model-gateway/logs/opencode-go.jsonl
 
 本仓库完成时已实际验证：
 
-- `node --test packages/dsh-model-gateway/test/gateway.test.mjs`：16/16 通过（启动/流式块协议、截断流、损坏 SSE、流内错误事件、length 工具调用、启动预检、启动期退出/待重启状态、崩溃重启、重启预算耗尽、健康看门狗、禁用重启、健康预算耗尽停止子进程、health path/URL、配置、SSE、脱敏）；
+- `node --test packages/dsh-model-gateway/test/gateway.test.mjs`：27/27 通过（启动/流式块协议、截断流、损坏 SSE、流内错误、SSE 行尾与分片、连接保活与空闲超时、缓存 token 计费、零值/稀疏 usage、stop 与截断的终态优先级、JSON 回退、启动期取消、length 工具调用、启动预检、启动期退出/待重启、崩溃重启、重启预算、健康看门狗、health path/URL、配置、脱敏）；
 - `gateway_status`：`running`、健康、PID、模型路由；
 - `gateway_selftest`：真实 OpenCode Go 流式响应，返回 `gateway ok` / `restart ok` / `autostart ok`；
 - 手动 `taskkill` 网关进程后：插件在约 1 秒内拉起新 PID，`restarts: 1`，随后自测成功；
